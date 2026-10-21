@@ -31,7 +31,10 @@ ensure_sqlite3() {
     echo "ghost: sqlite3 module missing, installing its prebuilt binary" >&2
     STAGING="${SQLITE3_STAGING_DIR:-${BLOG_DIR}/.sqlite3-staging}"
     rm -rf "$STAGING"
-    if ! runuser -u ghost -- sh -c "mkdir -p '$STAGING' && cd '$STAGING' && printf '{}' > package.json && npm install sqlite3@${SQLITE3_VERSION} --no-audit --no-fund"; then
+    # The pinned sqlite3 5.1.7 tree is from 2023 and npm prints deprecation
+    # warnings for it at every install; the packages are build-time only, so
+    # keep the boot log quiet (errors still abort the heal).
+    if ! runuser -u ghost -- sh -c "mkdir -p '$STAGING' && cd '$STAGING' && printf '{}' > package.json && npm install sqlite3@${SQLITE3_VERSION} --no-audit --no-fund --loglevel=error --no-update-notifier"; then
         rm -rf "$STAGING"
         return 1
     fi

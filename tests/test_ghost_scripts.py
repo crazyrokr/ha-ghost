@@ -366,6 +366,11 @@ def test_cont_heals_missing_sqlite3_module(sandbox):
     assert any("install sqlite3@5.1.7" in c for c in npm_calls), (
         f"the module must be reinstalled from the prebuilt binary: {calls}"
     )
+    # The 2023-era sqlite3 tree prints deprecation warnings at every install;
+    # the install must run quietly so the boot log stays readable.
+    assert any("install sqlite3@5.1.7" in c and "--loglevel=error" in c for c in npm_calls), (
+        f"the install must be quiet: {npm_calls}"
+    )
     marker = blog_dir / "current" / "node_modules" / "sqlite3" / "lib" / "index.js"
     assert marker.is_file(), "the sqlite3 package must be present in the app tree"
 

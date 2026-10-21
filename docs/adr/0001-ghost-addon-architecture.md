@@ -82,7 +82,15 @@ add-on that runs [Ghost](https://ghost.org/) inside Home Assistant with:
   `sh -c "prebuild-install ..."` fails with `Permission denied` (verified on
   a real instance: the heal aborted and the container stopped). The staging
   directory therefore defaults to `/config/ghost/.sqlite3-staging`
-  (writable bind mount, execution allowed) and is removed again afterwards. `python3` and `python3-setuptools` stay in
+  (writable bind mount, execution allowed) and is removed again afterwards.
+- The staging install runs with `--loglevel=error --no-update-notifier`:
+  the pinned sqlite3 5.1.7 tree is from 2023, so npm prints deprecation
+  warnings for its build-time-only dependencies (prebuild-install 7.x,
+  node-gyp 8, npmlog, …) at every install. Those transitive pins cannot be
+  bumped without replacing the pinned sqlite3 itself, so the noise is
+  suppressed instead; a failed install still aborts the heal. (The long-term
+  silence would be Ghost 6, which swapped sqlite3 for better-sqlite3 —
+  blocked today by its pnpm 12 requirement, see above.) `python3` and `python3-setuptools` stay in
   the image: ghost-cli 1.33.x's SQLite3 dependency check hard-fails on
   Node 22 without them, regardless of whether a build would happen.
 - Trade-off accepted: first boot needs reachability of the npm registry and
