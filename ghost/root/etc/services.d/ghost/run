@@ -1,0 +1,16 @@
+#!/command/with-contenv sh
+# ==============================================================================
+# Home Assistant Add-on: Ghost
+# Long-running service: start the installed Ghost blog as the ghost user.
+# ==============================================================================
+BLOG_DIR="${GHOST_BLOG_DIR:-/config/ghost}"
+
+if [ ! -f "$BLOG_DIR/config.production.json" ] || [ ! -d "$BLOG_DIR/current" ]; then
+    echo "ghost: no installed blog found in ${BLOG_DIR}" >&2
+    exit 1
+fi
+
+cd "$BLOG_DIR"
+NODE_ENV=production
+export NODE_ENV
+exec runuser -u ghost -- node current/index.js

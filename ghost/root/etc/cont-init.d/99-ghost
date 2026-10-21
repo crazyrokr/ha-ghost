@@ -1,0 +1,177 @@
+#!/command/with-contenv bashio
+# ==============================================================================
+# Home Assistant Add-on: Ghost
+# First-boot setup: install the Ghost blog into the persisted config volume
+# and generate its production config. Re-runs are no-ops: the blog is only
+# installed and configured when they do not exist yet.
+# GHOST_BLOG_DIR defaults to the add-on config directory.
+# ==============================================================================
+set -e
+
+BLOG_DIR="${GHOST_BLOG_DIR:-/config/ghost}"
+CONFIG_DIR="$(dirname "$BLOG_DIR")"
+GHOST_VERSION="5.130.6"
+GHOST_PORT="2368"
+# The sqlite3 version Ghost 5.130.6 depends on; the prebuilt binary is
+# installed for it (see ensure_sqlite3 below).
+SQLITE3_VERSION="5.1.7"
+
+# Ghost's own install (run through yarn) pins prebuild-install 7.1.1, which
+# cannot resolve its N-API target on Node 22.12+ and therefore silently drops
+# the sqlite3 optionalDependency. A plain npm install of the same package
+# resolves a current prebuild-install that downloads the prebuilt binary
+# instead of compiling it, so no C toolchain is needed in the image.
+ensure_sqlite3() {
+    if runuser -u ghost -- node -e "require('${BLOG_DIR}/current/node_modules/sqlite3')" 2>/dev/null; then
+        return 0
+    fi
+    echo "ghost: sqlite3 module missing, installing its prebuilt binary" >&2
+    STAGING="${SQLITE3_STAGING_DIR:-${TMPDIR:-/tmp}/ghost-sqlite3-staging}"
+    rm -rf "$STAGING"
+    if ! runuser -u ghost -- sh -c "mkdir -p '$STAGING' && cd '$STAGING' && printf '{}' > package.json && npm install sqlite3@${SQLITE3_VERSION} --no-audit --no-fund"; then
+        rm -rf "$STAGING"
+        return 1
+    fi
+    mkdir -p "${BLOG_DIR}/current/node_modules"
+    rm -rf "${BLOG_DIR}/current/node_modules/sqlite3"
+    cp -r "${STAGING}/node_modules/sqlite3" "${BLOG_DIR}/current/node_modules/sqlite3"
+    if [ "$(id -u)" = "0" ]; then
+        chown -R ghost:ghost "${BLOG_DIR}/current/node_modules/sqlite3"
+    fi
+    rm -rf "$STAGING"
+    runuser -u ghost -- node -e "require('${BLOG_DIR}/current/node_modules/sqlite3')" 2>/dev/null
+}
+
+mkdir -p "$CONFIG_DIR"
+# The container runs as root; hand the config volume to the ghost user.
+if [ "$(id -u)" = "0" ]; then
+    chown ghost:ghost "$CONFIG_DIR"
+fi
+
+if [ ! -f "$BLOG_DIR/config.production.json" ]; then
+    # Read the add-on 'url' option. bashio reports missing options as the
+    # string 'null'; normalize anything unusable to empty.
+    URL="$(bashio::config url 2>/dev/null || true)"
+    case "${URL}" in
+        "" | null | None | undefined) URL="" ;;
+    esac
+
+    if [ ! -d "$BLOG_DIR/current" ]; then
+        INSTALL_ARGS="install ${GHOST_VERSION} local --dir ${BLOG_DIR} --no-start --no-setup --db client --port ${GHOST_PORT} --ip 0.0.0.0"
+        # shellcheck disable=SC2086
+        runuser -u ghost -- ghost ${INSTALL_ARGS}
+    fi
+
+    mkdir -p "${BLOG_DIR}/content"
+    if [ "$(id -u)" = "0" ]; then
+        chown -R ghost:ghost "${BLOG_DIR}/content"
+    fi
+
+    # Ghost CLI with --no-setup generates no config; write the production
+    # config once. The blog binds all interfaces so the add-on ingress and
+    # the exposed port both reach it. The admin account is created by the
+    # user through the /ghost/ setup page on first visit.
+    if [ -n "${URL}" ]; then
+        URL_LINE="\"url\": \"${URL}\","
+    else
+        URL_LINE=""
+    fi
+    # Ghost 5 reads the 'database' key (not 'db'), resolves relative paths
+    # against the app directory, and ships a mysql default; so the content
+    # path and the sqlite file must be absolute paths into the blog volume.
+    cat > "$BLOG_DIR/config.production.json" <<EOF
+{
+${URL_LINE}
+  "server": {
+    "host": "0.0.0.0",
+    "port": ${GHOST_PORT}
+  },
+  "process": {
+    "title": "Ghost"
+  },
+  "logging": {
+    "level": "INFO"
+  },
+  "paths": {
+    "contentPath": "${BLOG_DIR}/content/"
+  },
+  "database": {
+    "client": "sqlite3",
+    "connection": {
+      "filename": "${BLOG_DIR}/content/data/ghost.db"
+    },
+    "settings": {
+      "busyRetryMax": 10000
+    },
+    "migrate": true
+  }
+}
+EOF
+    if [ "$(id -u)" = "0" ]; then
+        chown ghost:ghost "$BLOG_DIR/config.production.json"
+    fi
+fi
+
+# Without the sqlite driver the blog cannot start: Ghost exits silently and
+# the s6 service would crash-loop without any log output. On every boot this
+# verifies the module (and heals it with a prebuilt binary when missing).
+if [ -d "$BLOG_DIR/current" ]; then
+    if ! ensure_sqlite3; then
+        echo "ghost: sqlite3 native module is missing in ${BLOG_DIR}/current and could not be installed; check container network access" >&2
+        exit 1
+    fi
+fi
+
+# ---------------------------------------------------------------------------
+# Database options
+# Ghost's config loader merges environment variables with a double-underscore
+# separator (the same mechanism the official Ghost docker image uses) above
+# config files, so the add-on options are published into the s6 container
+# environment, which the service script applies through with-contenv.
+# Without db_type=mysql the built-in sqlite database from the generated
+# config file is used.
+# ---------------------------------------------------------------------------
+CONTAINER_ENV="${CONTAINER_ENV_DIR:-/run/s6/container_environment}"
+mkdir -p "$CONTAINER_ENV"
+
+DB_TYPE="$(bashio::config db_type 2>/dev/null || true)"
+case "${DB_TYPE}" in
+    "" | null | None | undefined) DB_TYPE="sqlite" ;;
+esac
+DB_HOST="$(bashio::config db_host 2>/dev/null || true)"
+case "${DB_HOST}" in
+    "" | null | None | undefined) DB_HOST="" ;;
+esac
+DB_PORT="$(bashio::config db_port 2>/dev/null || true)"
+case "${DB_PORT}" in
+    "" | null | None | undefined) DB_PORT="3306" ;;
+esac
+DB_USER="$(bashio::config db_user 2>/dev/null || true)"
+case "${DB_USER}" in
+    "" | null | None | undefined) DB_USER="" ;;
+esac
+DB_PASSWORD="$(bashio::config db_password 2>/dev/null || true)"
+case "${DB_PASSWORD}" in
+    "" | null | None | undefined) DB_PASSWORD="" ;;
+esac
+DB_NAME="$(bashio::config db_name 2>/dev/null || true)"
+case "${DB_NAME}" in
+    "" | null | None | undefined) DB_NAME="" ;;
+esac
+
+# Drop previously published variables: options may have been changed or
+# reverted since the last start.
+rm -f "${CONTAINER_ENV}/database__"* 2>/dev/null
+
+if [ "${DB_TYPE}" = "mysql" ]; then
+    if [ -z "${DB_HOST}" ] || [ -z "${DB_USER}" ] || [ -z "${DB_NAME}" ]; then
+        echo "ghost: db_type is mysql, but db_host, db_user and db_name must all be set" >&2
+        exit 1
+    fi
+    printf '%s' "mysql"                > "${CONTAINER_ENV}/database__client"
+    printf '%s' "${DB_HOST}"           > "${CONTAINER_ENV}/database__connection__host"
+    printf '%s' "${DB_PORT}"           > "${CONTAINER_ENV}/database__connection__port"
+    printf '%s' "${DB_USER}"           > "${CONTAINER_ENV}/database__connection__user"
+    printf '%s' "${DB_PASSWORD}"       > "${CONTAINER_ENV}/database__connection__password"
+    printf '%s' "${DB_NAME}"           > "${CONTAINER_ENV}/database__connection__database"
+fi

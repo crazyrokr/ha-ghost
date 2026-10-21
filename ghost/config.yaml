@@ -2,8 +2,9 @@ name: Ghost
 version: "0.0.1"
 slug: ghost
 description: Runs Ghost within your Home Assistant setup providing integration of live-features
+image: crazyrokr/ghost-{arch}
 url: https://github.com/crazyrokr/ha-ghost/tree/main/ghost
-webui: http://[HOST]:[PORT:3000]
+webui: http://[HOST]:[PORT:2368]
 panel_icon: "mdi:ghost-outline"
 arch:
   - aarch64
@@ -18,8 +19,22 @@ map:
     read_only: False
     path: /share
 ingress: true
-ingress_port: 3000
+ingress_port: 2368
 ports:
-  3000/tcp: null
-  3001/tcp: null
-  8082/tcp: null
+  2368/tcp: 2368
+options:
+  url: ""
+  db_type: sqlite
+  db_host: ""
+  db_port: 3306
+  db_user: ""
+  db_password: ""
+  db_name: ""
+schema:
+  url: str
+  db_type: choice(sqlite, mysql, default=sqlite)
+  db_host: str
+  db_port: "int(3306)"
+  db_user: str
+  db_password: str
+  db_name: str
