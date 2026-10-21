@@ -32,9 +32,9 @@ options:
   db_name: ""
 schema:
   url: str
-  db_type: list(sqlite|mysql|sqlite)
+  db_type: list(sqlite|mysql)
   db_host: str
   db_port: int
   db_user: str
-  db_password: str
+  db_password: password
   db_name: str

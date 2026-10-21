@@ -1,15 +1,19 @@
 #!/command/with-contenv sh
 # ==============================================================================
 # Home Assistant Add-on: Ghost
-# Long-running service: start the installed Ghost blog as the ghost user.
+# Long-running service: start the Ghost application shipped in the image,
+# with the blog's persisted data from the config volume.
 # ==============================================================================
 BLOG_DIR="${GHOST_BLOG_DIR:-/config/ghost}"
 
-if [ ! -f "$BLOG_DIR/config.production.json" ] || [ ! -d "$BLOG_DIR/current" ]; then
-    echo "ghost: no installed blog found in ${BLOG_DIR}" >&2
+if [ ! -f "$BLOG_DIR/config.production.json" ]; then
+    echo "ghost: no configured blog found in ${BLOG_DIR} (the first boot never completed)" >&2
     exit 1
 fi
 
+# Ghost resolves its config file from the working directory; the blog's
+# current/ symlink (created by the cont-init script) resolves into the
+# image's application.
 cd "$BLOG_DIR"
 NODE_ENV=production
 export NODE_ENV

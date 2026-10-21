@@ -2,11 +2,13 @@
 
 The scripts run under the HA debian-base image where s6 invokes them
 with the container environment and '/command/with-contenv' on PATH.
-Here they are executed with the same interpreter the image would use
-(bashio-based scripts under bash, plain scripts under sh), the same
-environment exported, and 'ghost'/'node'/'runuser' replaced by stubs
-that record their invocation. This keeps the tests hermetic (no
-network, no image build, no root).
+The Ghost application ships inside the image (GHOST_APP_DIR); the
+persisted volume holds only the user's blog data. Here the scripts are
+executed with the same interpreter the image would use (bashio-based
+scripts under bash, plain scripts under sh), the same environment
+exported, and 'ghost'/'node'/'runuser' replaced by stubs that record
+their invocation (the fake image app is a real directory tree). This
+keeps the tests hermetic (no network, no image build, no root).
 """
 
 import stat
@@ -54,19 +56,20 @@ def sandbox_fixture(tmp_path):
     container_env = tmp_path / "s6env"
     container_env.mkdir()
 
+    # The Ghost CLI is never invoked at runtime (the app is installed at
+    # build time); if a script tried, the boot must fail.
     ghost_stub = tmp_path / "ghost"
     ghost_stub.write_text(
         textwrap.dedent(
             """\
             #!/bin/sh
             echo "ghost $@" >> "$CALL_LOG"
-            mkdir -p "$GHOST_BLOG_DIR/current/node_modules"
-            touch "$GHOST_BLOG_DIR/config.production.json"
+            exit 1
             """
         )
     )
     # Like the real node: requiring the sqlite3 module succeeds only when the
-    # package (marker file) is actually present in the app tree.
+    # package (marker file) is actually present in the referenced app tree.
     node_stub = tmp_path / "node"
     node_stub.write_text(
         textwrap.dedent(
@@ -76,7 +79,12 @@ def sandbox_fixture(tmp_path):
             for a in "$@"; do
                 case "$a" in
                     *node_modules/sqlite3*)
-                        test -f "$GHOST_BLOG_DIR/current/node_modules/sqlite3/lib/index.js" || exit 1
+                        ROOT="${a%%node_modules/*}"
+                        case "$ROOT" in
+                            *require\\(*) ROOT="${ROOT#*require\\(}" ;;
+                        esac
+                        ROOT="${ROOT#\\'}"
+                        test -f "${ROOT}node_modules/sqlite3/lib/index.js" || exit 1
                         ;;
                 esac
             done
@@ -84,23 +92,26 @@ def sandbox_fixture(tmp_path):
             """
         )
     )
-    # Like npm install in a scratch directory: on success the sqlite3 package
-    # (with its prebuilt binary) appears under node_modules/ in the cwd.
-    # NPM_STUB_FAIL=1 simulates a failed download.
-    npm_stub = tmp_path / "npm"
-    npm_stub.write_text(
-        textwrap.dedent(
-            """\
-            #!/bin/sh
-            echo "npm cwd=$(pwd) $@" >> "$CALL_LOG"
-            case "${NPM_STUB_FAIL:-0}" in
-                1) exit 1 ;;
-            esac
-            mkdir -p node_modules/sqlite3/lib
-            printf 'module.exports = 1\n' > node_modules/sqlite3/lib/index.js
-            exit 0
-            """
-        )
+    # The Ghost application as installed in the image: versions/ tree with
+    # the sqlite3 module baked in, the current/ symlink, and the .ghost-cli
+    # version marker.
+    app_dir = tmp_path / "app"
+    app_version = app_dir / "versions" / "5.130.6"
+    (app_version / "node_modules" / "sqlite3" / "lib").mkdir(parents=True)
+    (app_version / "node_modules" / "sqlite3" / "lib" / "index.js").write_text(
+        "module.exports = 1\n", encoding="utf-8"
+    )
+    (app_version / "index.js").write_text("console.log('x')", encoding="utf-8")
+    (app_version / "content" / "data").mkdir(parents=True)
+    (app_version / "content" / "themes" / "casper").mkdir(parents=True)
+    (app_dir / "current").symlink_to(app_version)
+    # The image's application carries the content tree the installer created
+    # for it (subdirectories plus the linked built-in themes).
+    (app_dir / "content" / "data").mkdir(parents=True)
+    (app_dir / "content" / "themes" / "casper").mkdir(parents=True)
+    (app_dir / ".ghost-cli").write_text(
+        '{"active-version": "5.130.6", "cli-version": "1.33.7", "channel": "stable"}',
+        encoding="utf-8",
     )
     runuser_stub = tmp_path / "runuser"
     runuser_stub.write_text(
@@ -115,15 +126,15 @@ def sandbox_fixture(tmp_path):
             """
         )
     )
-    for stub in (ghost_stub, node_stub, npm_stub, runuser_stub):
+    for stub in (ghost_stub, node_stub, runuser_stub):
         stub.chmod(stub.stat().st_mode | stat.S_IEXEC)
 
     env = {
         "PATH": f"{tmp_path}:/usr/bin:/bin",
         "CALL_LOG": str(tmp_path / "calls.log"),
         "GHOST_BLOG_DIR": str(blog_dir),
+        "GHOST_APP_DIR": str(app_dir),
         "CONTAINER_ENV_DIR": str(container_env),
-        "SQLITE3_STAGING_DIR": str(tmp_path / "sq3staging"),
         "HOME": str(tmp_path / "root"),
     }
     return tmp_path, config_dir, blog_dir, container_env, env
@@ -183,25 +194,6 @@ def test_scripts_exist():
     assert SERVICE_RUN.is_file(), f"missing {SERVICE_RUN}"
 
 
-def test_sqlite3_staging_does_not_use_tmp():
-    # Given Home Assistant mounts the container /tmp as a noexec tmpfs
-    # (any file there fails with "Permission denied" when executed)
-    # When the cont-init script's staging directory default is checked
-    # Then it stages inside the blog volume, where execution is allowed
-    # (a /tmp or TMPDIR default breaks the prebuilt-binary install:
-    # "sh: 1: prebuild-install: Permission denied")
-    content = CONT_INIT.read_text(encoding="utf-8")
-    staging_lines = [line for line in content.splitlines() if "SQLITE3_STAGING_DIR:-" in line]
-    assert len(staging_lines) == 1, f"expected exactly one staging default: {staging_lines}"
-    default = staging_lines[0].split("SQLITE3_STAGING_DIR:-", 1)[1].rstrip("}")
-    assert "${BLOG_DIR}" in default, (
-        f"staging must live in the blog volume (exec-allowed): {staging_lines[0]}"
-    )
-    assert "/tmp" not in default and "TMPDIR" not in default, (
-        f"staging must not use the noexec /tmp: {staging_lines[0]}"
-    )
-
-
 def test_scripts_are_executable():
     # Given s6 executes the scripts directly (via their shebang)
     # When their file mode is checked
@@ -212,29 +204,28 @@ def test_scripts_are_executable():
         assert mode & 0o111, f"{script.name} must be executable (mode {oct(mode)})"
 
 
-def test_cont_installs_blog_on_first_boot(sandbox):
-    # Given no Ghost blog exists in the config volume yet (first boot)
+def test_cont_sets_up_blog_on_first_boot(sandbox):
+    # Given no Ghost blog exists in the config volume yet (first boot),
+    # while the Ghost application already ships in the image
     # When the cont-init script runs
-    # Then it installs the pinned Ghost version into the blog directory
-    # without starting it or prompting, as the ghost user (Ghost CLI
-    # refuses to run as root), and generates the production config
-    # bound to all interfaces on port 2368 with the sqlite database
+    # Then it never invokes the Ghost CLI (the app is pre-installed, no
+    # download needed), generates the production config bound to all
+    # interfaces on port 2368 with the sqlite database, and prepares the
+    # content directory
     _, _, blog_dir, container_env, env = sandbox
     result, calls = run_script(CONT_INIT, env, sandbox[0], shell="bash")
     assert result.returncode == 0, result.stderr
-    assert any(c.startswith("runuser ghost ") for c in calls), (
-        f"install must run as the ghost user: {calls}"
+    assert not ghost_calls(calls), (
+        f"the Ghost CLI must not run at runtime (app ships in the image): {calls}"
     )
-    calls = ghost_calls(calls)
-    assert calls, "ghost install was never called"
-    assert "install" in calls[0]
-    assert "5.130.6" in calls[0], "Ghost version must be pinned"
-    assert f"--dir {blog_dir}" in calls[0]
-    assert "--no-start" in calls[0]
-    assert "--no-setup" in calls[0], "install must not prompt (no TTY in add-on)"
-    assert "--db client" in calls[0]
-    assert "--port 2368" in calls[0]
-    assert "--ip 0.0.0.0" in calls[0], "Ghost must bind all interfaces for ingress"
+    assert (blog_dir / "content" / "data").is_dir(), (
+        "the content subdirectories must be seeded from the image's application"
+    )
+    current = blog_dir / "current"
+    assert current.is_symlink(), "the blog's current/ must be a symlink into the image's app"
+    assert current.resolve() == (Path(env["GHOST_APP_DIR"]) / "versions" / "5.130.6").resolve(), (
+        "current/ must resolve to the image's application"
+    )
 
     config = (blog_dir / "config.production.json").read_text()
     assert '"host": "0.0.0.0"' in config, f"config must bind all interfaces: {config}"
@@ -265,31 +256,56 @@ def test_cont_generates_config_with_url_option(sandbox):
     assert '"url": "https://blog.example.com"' in config, config
 
 
-def test_cont_skips_install_when_blog_exists(sandbox):
-    # Given a Ghost blog already exists (config.production.json present)
+def test_cont_removes_legacy_app_from_volume(sandbox):
+    # Given a volume created by an older add-on version, which installed
+    # the Ghost app into the volume (versions/ tree, current/ symlink,
+    # .ghost-cli marker) alongside the user's content and config
     # When the cont-init script runs
-    # Then it does not call ghost at all (idempotent, no re-install)
+    # Then the legacy app files are removed (the app now ships in the
+    # image) while the user's content and config survive
     _, _, blog_dir, _, env = sandbox
-    blog_dir.mkdir(parents=True, exist_ok=True)
-    (blog_dir / "config.production.json").write_text("{}", encoding="utf-8")
+    (blog_dir / "content" / "data").mkdir(parents=True)
+    (blog_dir / "content" / "data" / "ghost.db").write_bytes(b"old-db")
+    legacy = blog_dir / "versions" / "5.130.6"
+    legacy.mkdir(parents=True)
+    (legacy / "stale-file").write_text("x", encoding="utf-8")
+    (blog_dir / "current").symlink_to(legacy)
+    (blog_dir / ".ghost-cli").write_text('{"active-version": "5.130.6"}', encoding="utf-8")
+    (blog_dir / "config.production.json").write_text('{"user_edit": true}', encoding="utf-8")
+
     result, calls = run_script(CONT_INIT, env, sandbox[0], shell="bash")
     assert result.returncode == 0, result.stderr
-    assert not ghost_calls(calls), f"unexpected reinstall: {calls}"
+    assert not (blog_dir / "versions").exists(), "legacy versions/ must be removed"
+    assert not (blog_dir / ".ghost-cli").exists(), "legacy .ghost-cli must be removed"
+    assert (blog_dir / "content" / "data" / "ghost.db").read_bytes() == b"old-db", (
+        "the user's database must survive the cleanup"
+    )
+    assert (blog_dir / "config.production.json").read_text() == '{"user_edit": true}'
+    # The legacy current/ symlink is repointed at the image's application.
+    current = blog_dir / "current"
+    assert current.is_symlink(), "current/ must be a symlink"
+    assert current.resolve() == (Path(env["GHOST_APP_DIR"]) / "versions" / "5.130.6").resolve(), (
+        "current/ must now resolve to the image's application"
+    )
+    # The cleanup must not touch the app shipped in the image.
+    image_app_module = Path(env["GHOST_APP_DIR"]) / "current" / "node_modules" / "sqlite3" / "lib" / "index.js"
+    assert image_app_module.is_file(), "the image's app must survive the volume cleanup"
 
 
 def test_cont_does_not_rewrite_existing_config(sandbox):
-    # Given a blog already exists and the user changed options
+    # Given a blog already exists (config present) and the user changed
+    # options
     # When the cont-init script runs
-    # Then neither ghost nor the existing config file is touched
-    # (user edits to the config must survive restarts)
+    # Then the existing config file is not touched (user edits to the
+    # config must survive restarts)
     _, _, blog_dir, _, env = sandbox
     blog_dir.mkdir(parents=True, exist_ok=True)
-    (blog_dir / "current" / "node_modules").mkdir(parents=True)
+    (blog_dir / "content").mkdir()
     (blog_dir / "config.production.json").write_text('{"user_edit": true}', encoding="utf-8")
     env = {**env, "STUB_URL": "https://blog.example.com"}
     result, calls = run_script(CONT_INIT, env, sandbox[0], shell="bash")
     assert result.returncode == 0, result.stderr
-    assert not ghost_calls(calls), f"existing blog must not be reinstalled: {calls}"
+    assert not ghost_calls(calls), f"the CLI must not run for an existing blog: {calls}"
     assert (blog_dir / "config.production.json").read_text() == '{"user_edit": true}'
 
 
@@ -350,76 +366,41 @@ def test_cont_fails_on_incomplete_mysql_options(sandbox):
     assert database_env_files(sandbox[3]) == [], "no partial env may be published"
 
 
-def test_cont_heals_missing_sqlite3_module(sandbox):
-    # Given an installed blog whose yarn install dropped the sqlite3 module
-    # (Ghost's pinned prebuild-install cannot resolve its N-API target on
-    # this Node, so the optionalDependency was removed)
+def test_cont_fails_when_image_app_lacks_sqlite3(sandbox):
+    # Given the image's application is missing the sqlite3 module (a broken
+    # image build: the module is baked in at build time, verified there)
     # When the cont-init script runs
-    # Then it installs the module from its prebuilt binary with a plain npm
-    # install in a scratch directory and copies it into the app tree
+    # Then it exits non-zero (without the driver Ghost would exit silently
+    # and the s6 service would crash-loop without any log output)
     _, _, blog_dir, _, env = sandbox
-    (blog_dir / "current" / "node_modules").mkdir(parents=True, exist_ok=True)
+    blog_dir.mkdir(parents=True, exist_ok=True)
     (blog_dir / "config.production.json").write_text("{}", encoding="utf-8")
+    module = Path(env["GHOST_APP_DIR"]) / "versions" / "5.130.6" / "node_modules" / "sqlite3"
+    for path in module.rglob("*"):
+        if path.is_file():
+            path.unlink()
     result, calls = run_script(CONT_INIT, env, sandbox[0], shell="bash")
-    assert result.returncode == 0, result.stderr
-    npm_calls = [c for c in calls if c.startswith("npm ")]
-    assert any("install sqlite3@5.1.7" in c for c in npm_calls), (
-        f"the module must be reinstalled from the prebuilt binary: {calls}"
-    )
-    # The 2023-era sqlite3 tree prints deprecation warnings at every install;
-    # the install must run quietly so the boot log stays readable.
-    assert any("install sqlite3@5.1.7" in c and "--loglevel=error" in c for c in npm_calls), (
-        f"the install must be quiet: {npm_calls}"
-    )
-    marker = blog_dir / "current" / "node_modules" / "sqlite3" / "lib" / "index.js"
-    assert marker.is_file(), "the sqlite3 package must be present in the app tree"
-
-
-def test_cont_skips_heal_when_sqlite3_present(sandbox):
-    # Given an installed blog whose node_modules already carries a working
-    # sqlite3 module
-    # When the cont-init script runs
-    # Then it leaves it alone (no npm call at all)
-    _, _, blog_dir, _, env = sandbox
-    module = blog_dir / "current" / "node_modules" / "sqlite3" / "lib"
-    module.mkdir(parents=True)
-    (module / "index.js").write_text("module.exports = 1\n", encoding="utf-8")
-    (blog_dir / "config.production.json").write_text("{}", encoding="utf-8")
-    result, calls = run_script(CONT_INIT, env, sandbox[0], shell="bash")
-    assert result.returncode == 0, result.stderr
+    assert result.returncode != 0, "boot must fail when the image app lacks the sqlite3 module"
     assert not [c for c in calls if c.startswith("npm ")], (
-        f"the module is already present, no install expected: {calls}"
-    )
-
-
-def test_cont_fails_when_sqlite3_install_fails(sandbox):
-    # Given an installed blog without the sqlite3 module, and the prebuilt
-    # binary download fails (npm exits non-zero)
-    # When the cont-init script runs
-    # Then it exits non-zero (the blog cannot start) without leaving a
-    # half-installed package behind
-    _, _, blog_dir, _, env = sandbox
-    (blog_dir / "current" / "node_modules").mkdir(parents=True, exist_ok=True)
-    (blog_dir / "config.production.json").write_text("{}", encoding="utf-8")
-    env = {**env, "NPM_STUB_FAIL": "1"}
-    result, _ = run_script(CONT_INIT, env, sandbox[0], shell="bash")
-    assert result.returncode != 0, "boot must fail when the sqlite3 module cannot be installed"
-    assert not (blog_dir / "current" / "node_modules" / "sqlite3").exists(), (
-        "no half-installed package may be left behind"
+        f"no runtime package installs are expected: {calls}"
     )
 
 
 # ------------------------------------------------------------------ service
 
 def test_service_runs_ghost_with_production_node(sandbox):
-    # Given a fully installed Ghost blog (current/ directory present)
+    # Given a configured blog (config.production.json present) and the
+    # Ghost application shipped in the image
     # When the s6 run script starts
-    # Then it executes the Ghost entry point as the ghost user with
-    # NODE_ENV=production from the blog directory
+    # Then it executes the image's entry point as the ghost user with
+    # NODE_ENV=production from the blog directory (Ghost resolves the
+    # config file from the working directory)
     _, _, blog_dir, _, env = sandbox
-    (blog_dir / "current").mkdir(parents=True)
-    (blog_dir / "current" / "index.js").write_text("console.log('x')", encoding="utf-8")
+    blog_dir.mkdir(parents=True, exist_ok=True)
     (blog_dir / "config.production.json").write_text("{}", encoding="utf-8")
+    # The cont-init script created the blog's current/ symlink into the
+    # image's application (Ghost's root detection requires it).
+    (blog_dir / "current").symlink_to(Path(env["GHOST_APP_DIR"]) / "current")
     result, calls = run_script(SERVICE_RUN, env, sandbox[0])
     assert any(c.startswith("runuser ghost node ") for c in calls), (
         f"ghost must run as the ghost user: {calls}"
@@ -428,7 +409,9 @@ def test_service_runs_ghost_with_production_node(sandbox):
     assert calls, f"node was never started: {calls}"
     assert f"cwd={blog_dir}" in calls[0], f"wrong working directory: {calls[0]}"
     assert "NODE_ENV=production" in calls[0], f"missing NODE_ENV=production: {calls[0]}"
-    assert calls[0].endswith("current/index.js")
+    assert calls[0].endswith("current/index.js"), (
+        f"the blog's current/ entry point must be started: {calls[0]}"
+    )
 
 
 def test_service_fails_when_blog_missing(sandbox):

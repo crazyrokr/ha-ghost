@@ -4,7 +4,9 @@
 
 Accepted (2026-10-21). This is the single architecture record for the Ghost
 add-on; future architectural changes extend this document rather than adding
-per-change records.
+per-change records. Updated 2026-10-21: the Ghost application moved from a
+first-boot volume install to a two-stage image build (no Python in the final
+image).
 
 ## Context
 
@@ -29,21 +31,39 @@ add-on that runs [Ghost](https://ghost.org/) inside Home Assistant with:
   family provides no Node-based image (only alpine/debian/python/ubuntu), so
   the Node runtime comes from the official hash-verified Node 22 tarball,
   selected per `TARGETARCH`.
+- **Two-stage build.** The `app` stage installs Node, Python, and the Ghost
+  CLI and installs the Ghost application into `/opt/ghost`; the final stage
+  re-installs the same Node tarball and copies only the application tree
+  (`COPY --from=app /opt/ghost`). The published image therefore carries no
+  Python and no Ghost CLI: they exist only in the discarded builder stage.
 - **Node 22, not the distro's Node 20**: ghost-cli 1.33.7 pulls an execa
   release that needs Node >= 22.12, and Ghost 5.130.6 supports
   `^18.12.1 || ^20.11.1 || ^22.13.1`. Ghost 6.x was rejected: its CLI flow
   requires pnpm 12, which is not available on trixie.
-- **ghost-cli 1.33.7 is pinned** in the Dockerfile and kept current by
-  Renovate.
+- **ghost-cli 1.33.7 is pinned** in the Dockerfile (builder stage only) and
+  kept current by Renovate.
 
 ### First-boot install flow
 
-- `etc/cont-init.d/99-ghost` (bashio) runs before the s6 service. On the
-  first boot (no `config.production.json` yet) it runs
-  `ghost install 5.130.6 local --no-start --no-setup --db client
-  --port 2368 --ip 0.0.0.0` into the persisted config volume at
-  `/config/ghost`, then writes `config.production.json` once. Reboots never
-  re-install or rewrite the config.
+- The application is installed **at build time** in the `app` stage with
+  `ghost install 5.130.6 local --dir /opt/ghost --no-start --no-setup
+  --db client --port 2368 --ip 0.0.0.0` and ships in the final image at
+  `/opt/ghost`, owned by the `ghost` user (its `current` symlink points
+  into `/opt/ghost/versions/<version>`).
+- `etc/cont-init.d/99-ghost` (bashio) runs before the s6 service and
+  prepares the persisted volume at `/config/ghost`. Every boot it removes
+  the legacy in-volume application (earlier add-on versions installed
+  `versions/` and `.ghost-cli` into the volume; the content and the config
+  are kept) and (re)creates the blog's `current` symlink pointing at the
+  image's application. The symlink is required by Ghost's internal root
+  detection (`@tryghost/root-utils` requires a `current` directory in the
+  working directory) and is refreshed on every boot so an add-on update
+  (new app version) takes effect.
+- On the first boot (no `config.production.json` yet) the script seeds the
+  persisted `content/` from the image's `content/` tree (the installer
+  creates the subdirectories and links the built-in themes; without them the
+  SQLite database could not be created and Ghost would exit silently) and
+  writes `config.production.json` once. Reboots never rewrite the config.
 - Ghost CLI refuses to run as root while the container runs as root, so a
   dedicated `ghost` user owns the blog volume; the long-running process is
   started with the base image's built-in `runuser` (no su-exec package).
@@ -54,7 +74,8 @@ add-on that runs [Ghost](https://ghost.org/) inside Home Assistant with:
   content path and the SQLite file are absolute paths into the blog volume.
 - The service script (`etc/services.d/ghost/run`) runs
   `runuser -u ghost -- node current/index.js` with `NODE_ENV=production`
-  from the blog directory, and fails hard if no blog is installed (s6
+  from the blog directory (whose `current/` symlink resolves into the
+  image's application), and fails hard if no configured blog exists (s6
   reports the failure instead of crash-looping silently).
 
 ### SQLite default: prebuilt binary, no C toolchain
@@ -72,31 +93,35 @@ add-on that runs [Ghost](https://ghost.org/) inside Home Assistant with:
   `npm install sqlite3@5.1.7` resolves prebuild-install 7.1.3, which
   downloads the prebuilt binary (published by TryGhost for
   linux-x64/arm64) in seconds.
-- **Consequence:** the image carries no C toolchain (no build-essential,
-  ~400 MB smaller). The cont-init script heals a dropped module by running
-  that npm install in a scratch directory and copying the package into the
-  app tree (idempotent, every boot; the copy is only attempted when the
-  module is actually missing).
-- **The scratch directory must be in the blog volume, not in `/tmp`:**
+- **Consequence:** the image carries no C toolchain (no build-essential).
+  The module is installed **at build time** by running that npm install in a
+  staging directory inside the application tree and copying the package into
+  `current/node_modules`, with a final `node -e "require('sqlite3')"` check;
+  the staging directory is removed before the stage is handed over. At
+  runtime the cont-init script only *verifies* the module (through the
+  blog's `current/` symlink) and fails loudly if the image is broken — no
+  download, no install, no network at runtime.
+- **The staging directory lives in the application tree, not in `/tmp`:**
   Home Assistant mounts the container `/tmp` as a `noexec` tmpfs, where
   `sh -c "prebuild-install ..."` fails with `Permission denied` (verified on
-  a real instance: the heal aborted and the container stopped). The staging
-  directory therefore defaults to `/config/ghost/.sqlite3-staging`
-  (writable bind mount, execution allowed) and is removed again afterwards.
+  a real instance). The staging directory is therefore
+  `/opt/ghost/.sqlite3-staging` and is removed before the stage is handed
+  over to the final image.
 - The staging install runs with `--loglevel=error --no-update-notifier`:
   the pinned sqlite3 5.1.7 tree is from 2023, so npm prints deprecation
   warnings for its build-time-only dependencies (prebuild-install 7.x,
   node-gyp 8, npmlog, …) at every install. Those transitive pins cannot be
   bumped without replacing the pinned sqlite3 itself, so the noise is
-  suppressed instead; a failed install still aborts the heal. (The long-term
-  silence would be Ghost 6, which swapped sqlite3 for better-sqlite3 —
-  blocked today by its pnpm 12 requirement, see above.) `python3` and `python3-setuptools` stay in
-  the image: ghost-cli 1.33.x's SQLite3 dependency check hard-fails on
-  Node 22 without them, regardless of whether a build would happen.
-- Trade-off accepted: first boot needs reachability of the npm registry and
-  GitHub release assets (for the ~1 MB binary). If both are blocked the
-  add-on fails at boot with a clear error instead of a silent crash-loop,
-  and re-booting retries the download.
+  suppressed instead; a failed install still aborts the build. (The
+  long-term silence would be Ghost 6, which swapped sqlite3 for
+  better-sqlite3 — blocked today by its pnpm 12 requirement, see above.)
+  `python3` and `python3-setuptools` are installed in the `app` stage only:
+  ghost-cli 1.33.x's SQLite3 dependency check hard-fails on Node 22 without
+  them, regardless of whether a build would happen — and the stage is
+  discarded, so the published image carries no Python.
+- Trade-off accepted: the npm registry and the GitHub release assets must be
+  reachable **at build time only**; a running container never downloads
+  anything.
 
 ### External database via add-on options
 
@@ -122,10 +147,10 @@ add-on that runs [Ghost](https://ghost.org/) inside Home Assistant with:
   `ports: 2368/tcp` (standalone). The blog front page is `/`, the admin
   panel `/ghost/` (the admin account is created by the user in the setup
   wizard on first visit; no credentials are baked into the add-on).
-- `map:` exposes `addon_config` at `/config` (writable; the whole blog
-  lives there) and `share` at `/share`; `tmpfs: true` keeps the container's
-  `/tmp` (including bashio's option cache) fresh on every start, so option
-  changes always take effect.
+- `map:` exposes `addon_config` at `/config` (writable; the blog's content
+  and config live there, the application stays in the image) and `share` at
+  `/share`; `tmpfs: true` keeps the container's `/tmp` (including bashio's
+  option cache) fresh on every start, so option changes always take effect.
 
 ### CI/CD and metadata hygiene
 
@@ -140,8 +165,12 @@ add-on that runs [Ghost](https://ghost.org/) inside Home Assistant with:
 
 - The add-on works with zero external services (built-in SQLite, persisted
   in `/config/ghost`) and with an external MariaDB/MySQL when configured.
-- The image is ~400 MB lighter than a build-toolchain variant, at the cost
-  of a first-boot network dependency (documented above).
+- The published image is ~1.0 GB (the ~520 MB application tree ships in the
+  layers) instead of ~622 MB with a first-boot install — at the benefit of a
+  network-free first boot, a ~1.2 MB persisted volume (smaller HA backups),
+  and add-on updates that deliver new Ghost versions without any user
+  action. Volumes written by earlier add-on versions are migrated in place
+  on the first start.
 - Ghost is pinned to the 5.x line (5.130.6); moving to Ghost 6 requires
   revisiting the Node/pnpm decision.
 - Because bashio caches add-on options in `/tmp`, `tmpfs: true` is required
@@ -149,15 +178,21 @@ add-on that runs [Ghost](https://ghost.org/) inside Home Assistant with:
 
 ## Verification
 
-- `tests/` (Python, Given-When-Then): manifest/hassfest-mirror checks,
-  Dockerfile structure, CI/renovate/lock consistency, and behavior tests
-  for the s6 scripts (first-boot install args, config generation, SQLite
-  healing incl. the npm-failure edge case, mysql option publishing, stale
-  env clearing, service start).
+- `tests/` (Python, Given-When-Then, 43 tests): manifest/hassfest-mirror
+  checks, Dockerfile structure (two-stage layout, build-time Ghost install
+  into `/opt/ghost`, Python in the builder stage only, no package-install
+  layer in the final stage, Node tarball hashes for both architectures),
+  CI/renovate/lock consistency, and behavior tests for the s6 scripts
+  (first-boot volume setup with content seeding, legacy in-volume cleanup,
+  config generation, the sqlite3 verification incl. the broken-image edge
+  case, mysql option publishing, stale env clearing, service start).
 - End-to-end in Docker: an add-on container with the real s6 init against a
-  fake supervisor — first boot installs, heals the SQLite module from the
-  prebuilt binary, serves `/` and `/ghost/` (HTTP 200), creates
-  `content/data/ghost.db`; with `db_type: mysql` the same container runs
+  fake supervisor — a fresh volume boots with the image-resident
+  application, creates `content/data/ghost.db`, and serves `/` and
+  `/ghost/` (HTTP 200) without any download; a restart boots in ~1 s with
+  no error log entries; a legacy volume (522 MB, installed by an earlier
+  add-on version) is migrated in place to the new layout (1.2 MB, content
+  and database preserved); with `db_type: mysql` the same container runs
   the migrations against a real MariaDB container (75 tables) and creates
   no SQLite file; reverting the options clears the stale `database__*`
   variables and the blog returns to SQLite.

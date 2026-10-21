@@ -27,12 +27,21 @@ def test_dockerfile_exists():
 
 
 def test_base_image_is_hassio_debian_base():
-    # Given the Dockerfile exists
-    # When its FROM line is checked
-    # Then it builds on the official hassio debian-base image
+    # Given the Dockerfile uses a multi-stage build
+    # When its FROM lines are checked
+    # Then every stage builds on the official hassio debian-base image
     from_lines = [line for line in read_lines() if line.startswith("FROM ")]
-    assert len(from_lines) == 1, "exactly one FROM stage expected"
-    assert from_lines[0].startswith("FROM ghcr.io/hassio-addons/debian-base:"), from_lines[0]
+    assert from_lines, "Dockerfile must declare at least one stage"
+    for line in from_lines:
+        assert line.startswith("FROM ghcr.io/hassio-addons/debian-base:"), line
+
+
+def final_stage():
+    # The last FROM starts the final image; only that stage's instructions
+    # end up in the published image (the earlier stages are discarded).
+    lines = read_lines()
+    last_from = max(i for i, line in enumerate(lines) if line.startswith("FROM "))
+    return "\n".join(lines[last_from:])
 
 
 def test_copy_root_matches_build_context():
@@ -56,18 +65,63 @@ def test_ghost_cli_is_pinned_not_latest():
         assert re.search(r"ghost-cli@\d+\.\d+\.\d+", line), f"ghost-cli version not pinned: {line}"
 
 
-def test_python_present_for_cli_dependency_check():
+def test_python_installed_in_build_stage_only():
     # Given ghost-cli 1.33.x refuses to install Ghost 5 on Node 22 without
     # a usable Python (it checks python3, plus setuptools for 3.12+)
     # When the Dockerfile is checked
-    # Then the interpreter is installed but no C toolchain is (the sqlite3
-    # native module comes as a prebuilt binary, see the add-on cont-init)
+    # Then Python is installed in the (discarded) build stage only: the
+    # final image carries no Python at all
     content = DOCKERFILE.read_text(encoding="utf-8")
-    assert re.search(r"apt-get install .*python3", content), "python3 must be installed"
+    assert re.search(r"apt-get install .*python3", content), "python3 must be installed (build stage)"
     assert "python3-setuptools" in content, "setuptools is required for the trixie Python 3.13"
-    assert "build-essential" not in content, (
+    assert "apt-get" not in final_stage(), (
+        "the final image must not install any packages (no Python)"
+    )
+
+
+def test_no_c_toolchain_anywhere():
+    # Given the sqlite3 native module is used as a prebuilt binary
+    # (downloaded at build time, never compiled)
+    # When the Dockerfile is checked
+    # Then no C toolchain package appears in any stage
+    content = DOCKERFILE.read_text(encoding="utf-8")
+    assert "build-essential" not in content and "build-base" not in content, (
         "no C toolchain is needed: sqlite3 is installed from its prebuilt binary"
     )
+
+
+def test_ghost_app_is_installed_at_build_time():
+    # Given the add-on ships the Ghost application in the image (so a fresh
+    # container starts without any download, and no Python is needed at
+    # runtime)
+    # When the Dockerfile is checked
+    # Then the pinned Ghost version is installed into /opt/ghost in a
+    # discarded stage and handed over to the final image
+    content = DOCKERFILE.read_text(encoding="utf-8")
+    assert re.search(r"ghost install \d+\.\d+\.\d+ local", content), (
+        "the Ghost app must be installed at build time"
+    )
+    assert "--dir /opt/ghost" in content, "the app must be installed to /opt/ghost"
+    assert "COPY --from=" in content, "the app must be copied into the final stage"
+    assert "ghost install" not in final_stage(), (
+        "the app must not be (re)installed in the final image"
+    )
+    assert "npm install" not in final_stage() or "sqlite3" in final_stage(), (
+        "no runtime package installs in the final image"
+    )
+
+
+def test_build_time_sqlite3_staging_not_in_tmp():
+    # Given the build-time heal runs 'prebuild-install' from the staging
+    # directory (an executed file), mirroring the runtime lesson that
+    # executed files must not live in /tmp
+    # When the Dockerfile staging default is checked
+    # Then it stages inside the app directory, not in /tmp
+    content = DOCKERFILE.read_text(encoding="utf-8")
+    staging_lines = [line for line in content.splitlines() if "sqlite3-staging" in line]
+    assert staging_lines, "the build-time heal must use a named staging directory"
+    default = staging_lines[0].split("sqlite3-staging", 1)[0]
+    assert "/opt/ghost" in default and "/tmp" not in default, staging_lines[0]
 
 
 def test_node_is_pinned_and_hash_verified():

@@ -5,10 +5,11 @@
 ## Summary
 
 This add-on runs [Ghost](https://ghost.org/) — the headless content management
-system — inside Home Assistant. On first start it installs a pinned Ghost
-release into the persisted add-on config volume, then serves the blog and the
-admin panel on port 2368, reachable from the add-on **Web UI**, the HA side
-panel (ingress), or the exposed port.
+system — inside Home Assistant. The pinned Ghost release ships inside the
+add-on image; on first start the add-on only generates the blog config in the
+persisted config volume, then serves the blog and the admin panel on port
+2368, reachable from the add-on **Web UI**, the HA side panel (ingress), or
+the exposed port.
 
 By default the blog uses Ghost's built-in SQLite database, stored in the
 persisted config volume — no separate database container needed. An external
@@ -16,9 +17,10 @@ MariaDB/MySQL database can be selected through the add-on options instead.
 
 ## Features
 
-- **Self-installing.** The first boot installs Ghost 5.130.6 into
-  `/config/ghost` (persisted across updates) and generates its production
-  config; later boots simply start the existing blog.
+- **Fast first start.** The Ghost 5.130.6 application is pre-installed in the
+  add-on image (no download at runtime, no Python in the final image); the
+  first boot only generates the production config and starts the blog in a
+  couple of seconds.
 - **SQLite by default, MariaDB if you prefer it.** The built-in SQLite file
   lives in the blog's content volume. Set `db_type` to `mysql` in the options
   to point the blog at an external MariaDB/MySQL database instead.
@@ -27,8 +29,9 @@ MariaDB/MySQL database can be selected through the add-on options instead.
 - **Safe by design.** The blog runs as a dedicated non-root `ghost` user; the
   container runs under the standard Home Assistant `debian-base` image with
   s6 supervision.
-- **Reproducible image.** The base image is digest-pinned and the Ghost CLI /
-  Node versions are pinned in the build (kept current by Renovate).
+- **Reproducible image.** The base image is digest-pinned and the Ghost /
+  Ghost CLI / Node versions are pinned in the build (kept current by
+  Renovate); the Ghost CLI is used at build time only.
 - **aarch64 & amd64.**
 
 ## How to Install
@@ -44,8 +47,9 @@ MariaDB/MySQL database can be selected through the add-on options instead.
    and click **Reload**.
 
 2. **Install the add-on.** The **Ghost** add-on now appears in the add-on
-   store — install and start it. The first start takes a few minutes
-   (Ghost is downloaded and installed into the config volume).
+   store — install and start it. The first start takes a few seconds (the
+   Ghost application ships inside the image; nothing is downloaded at
+   runtime).
 
 3. **Create the admin account.** Open the add-on **Web UI** and visit
    `/ghost/` — the setup wizard asks for the admin name, email, and password.
@@ -65,7 +69,7 @@ MariaDB/MySQL database can be selected through the add-on options instead.
 | `db_host`    | `str`                           | Host of the external database (required with `db_type: mysql`).    |
 | `db_port`    | `int(3306)`                     | Port of the external database.                                      |
 | `db_user`    | `str`                           | User of the external database (required with `db_type: mysql`).    |
-| `db_password`| `str`                           | Password of the external database.                                  |
+| `db_password`| `password`                      | Password of the external database.                                  |
 | `db_name`    | `str`                           | Name of the external database (required with `db_type: mysql`).    |
 
 With `db_type: mysql` the add-on starts Ghost with the
@@ -76,16 +80,20 @@ config loader merges above the generated config file. All of `db_host`,
 
 ## Persistence
 
-The whole blog (content, uploads, themes, SQLite database, config) lives in
-the add-on config directory at `/config/ghost`, persisted across updates and
-restarts. The `/share` mount is also available for extra data.
+The blog's data (content, uploads, themes, SQLite database) and its config
+live in the add-on config directory at `/config/ghost`, persisted across
+updates and restarts — typically a couple of megabytes, since the
+application itself stays inside the image. The `/share` mount is also
+available for extra data.
 
 ## Documentation
 
 - [`docs/adr/0001-ghost-addon-architecture.md`](docs/adr/0001-ghost-addon-architecture.md) —
-  architecture decision record: base image and version pins, first-boot
-  install flow, SQLite default with prebuilt-binary self-healing, external
-  database via add-on options, and the removal of the template leftovers.
+  architecture decision record: two-stage image build with the Ghost
+  application pre-installed (no Python in the final image), first-boot
+  volume preparation, SQLite default with a prebuilt binary baked in at
+  build time, external database via add-on options, and the removal of the
+  template leftovers.
 
 ## License
 
