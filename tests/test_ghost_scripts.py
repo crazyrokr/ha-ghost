@@ -183,6 +183,25 @@ def test_scripts_exist():
     assert SERVICE_RUN.is_file(), f"missing {SERVICE_RUN}"
 
 
+def test_sqlite3_staging_does_not_use_tmp():
+    # Given Home Assistant mounts the container /tmp as a noexec tmpfs
+    # (any file there fails with "Permission denied" when executed)
+    # When the cont-init script's staging directory default is checked
+    # Then it stages inside the blog volume, where execution is allowed
+    # (a /tmp or TMPDIR default breaks the prebuilt-binary install:
+    # "sh: 1: prebuild-install: Permission denied")
+    content = CONT_INIT.read_text(encoding="utf-8")
+    staging_lines = [line for line in content.splitlines() if "SQLITE3_STAGING_DIR:-" in line]
+    assert len(staging_lines) == 1, f"expected exactly one staging default: {staging_lines}"
+    default = staging_lines[0].split("SQLITE3_STAGING_DIR:-", 1)[1].rstrip("}")
+    assert "${BLOG_DIR}" in default, (
+        f"staging must live in the blog volume (exec-allowed): {staging_lines[0]}"
+    )
+    assert "/tmp" not in default and "TMPDIR" not in default, (
+        f"staging must not use the noexec /tmp: {staging_lines[0]}"
+    )
+
+
 def test_scripts_are_executable():
     # Given s6 executes the scripts directly (via their shebang)
     # When their file mode is checked

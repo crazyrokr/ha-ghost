@@ -76,7 +76,13 @@ add-on that runs [Ghost](https://ghost.org/) inside Home Assistant with:
   ~400 MB smaller). The cont-init script heals a dropped module by running
   that npm install in a scratch directory and copying the package into the
   app tree (idempotent, every boot; the copy is only attempted when the
-  module is actually missing). `python3` and `python3-setuptools` stay in
+  module is actually missing).
+- **The scratch directory must be in the blog volume, not in `/tmp`:**
+  Home Assistant mounts the container `/tmp` as a `noexec` tmpfs, where
+  `sh -c "prebuild-install ..."` fails with `Permission denied` (verified on
+  a real instance: the heal aborted and the container stopped). The staging
+  directory therefore defaults to `/config/ghost/.sqlite3-staging`
+  (writable bind mount, execution allowed) and is removed again afterwards. `python3` and `python3-setuptools` stay in
   the image: ghost-cli 1.33.x's SQLite3 dependency check hard-fails on
   Node 22 without them, regardless of whether a build would happen.
 - Trade-off accepted: first boot needs reachability of the npm registry and

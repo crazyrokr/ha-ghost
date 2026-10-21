@@ -21,12 +21,15 @@ SQLITE3_VERSION="5.1.7"
 # the sqlite3 optionalDependency. A plain npm install of the same package
 # resolves a current prebuild-install that downloads the prebuilt binary
 # instead of compiling it, so no C toolchain is needed in the image.
+# The staging directory lives in the blog volume, not in /tmp: Home Assistant
+# mounts /tmp as a noexec tmpfs, where the npm install script cannot be
+# executed ("prebuild-install: Permission denied").
 ensure_sqlite3() {
     if runuser -u ghost -- node -e "require('${BLOG_DIR}/current/node_modules/sqlite3')" 2>/dev/null; then
         return 0
     fi
     echo "ghost: sqlite3 module missing, installing its prebuilt binary" >&2
-    STAGING="${SQLITE3_STAGING_DIR:-${TMPDIR:-/tmp}/ghost-sqlite3-staging}"
+    STAGING="${SQLITE3_STAGING_DIR:-${BLOG_DIR}/.sqlite3-staging}"
     rm -rf "$STAGING"
     if ! runuser -u ghost -- sh -c "mkdir -p '$STAGING' && cd '$STAGING' && printf '{}' > package.json && npm install sqlite3@${SQLITE3_VERSION} --no-audit --no-fund"; then
         rm -rf "$STAGING"
