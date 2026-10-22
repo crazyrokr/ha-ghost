@@ -24,8 +24,9 @@ MariaDB/MySQL database can be selected through the add-on options instead.
 - **SQLite by default, MariaDB if you prefer it.** The built-in SQLite file
   lives in the blog's content volume. Set `db_type` to `mysql` in the options
   to point the blog at an external MariaDB/MySQL database instead.
-- **Two ways in.** Ingress side panel (no host port required) and/or the
-  exposed 2368 port for standalone access.
+- **Two ways in.** The exposed 2368 port for the blog (direct
+  `http://<host>:2368`, or through a TLS reverse proxy on a domain) and the
+  add-on's ingress side panel for the admin panel (append `/ghost/`).
 - **Safe by design.** The blog runs as a dedicated non-root `ghost` user; the
   container runs under the standard Home Assistant `debian-base` image with
   s6 supervision.
@@ -51,20 +52,42 @@ MariaDB/MySQL database can be selected through the add-on options instead.
    Ghost application ships inside the image; nothing is downloaded at
    runtime).
 
-3. **Create the admin account.** Open the add-on **Web UI** and visit
-   `/ghost/` — the setup wizard asks for the admin name, email, and password.
-   The blog front page is served at `/`.
+3. **Point the blog at its public origin.** In **Settings → add-on
+   configuration** set `url` to the exact origin you browse the blog at
+   (e.g. `http://192.168.1.10:2368` or `https://blog.example.com`), then
+   restart the add-on — see [Access](#access).
 
-4. **(Optional) External database.** In **Settings → add-on configuration**
+4. **Create the admin account.** Open the blog at that origin and visit
+   `/ghost/` — the setup wizard asks for the admin name, email, and
+   password. The blog front page is served at `/`.
+
+5. **(Optional) External database.** In **Settings → add-on configuration**
    set `db_type` to `mysql` and fill in `db_host`, `db_port`, `db_user`,
    `db_password`, and `db_name`, then restart the add-on. Reverting to
    `sqlite` switches the blog back to its built-in database.
+
+## Access
+
+Ghost serves its theme and core assets relative to the site root and builds
+its links, sitemaps, and in-page API references from the `url` option, so
+the blog must be reachable at an origin root — scheme, host, port — without
+a path prefix:
+
+- **Exposed port (recommended for the blog).** Browse the blog directly at
+  `http://<host>:2368`, or put a TLS reverse proxy (Traefik, nginx, …) on a
+  domain that forwards to the add-on's port, and set `url` to that exact
+  origin. Without `url`, Ghost falls back to `http://localhost:2368/`,
+  whose references resolve to the visitor's own machine.
+- **Ingress side panel.** Home Assistant serves the add-on under a path
+  prefix; the admin panel (`/ghost/`) renders there, but the front page's
+  root-relative asset references cannot — this is a Ghost limitation, not
+  an add-on defect. Use the exposed port for the blog itself.
 
 ## Options
 
 | Option       | Schema                          | Description                                                        |
 | ------------ | ------------------------------- | ------------------------------------------------------------------ |
-| `url`        | `str`                           | Public URL of the blog (used in links and sitemaps). Leave empty to let Ghost default. |
+| `url`        | `str`                           | The exact origin visitors use to reach the blog (e.g. `https://blog.example.com` or `http://192.168.1.10:2368`). See [Access](#access). |
 | `db_type`    | `choice(sqlite, mysql, default=sqlite)` | Database backend: the built-in SQLite file, or an external MariaDB/MySQL server. |
 | `db_host`    | `str`                           | Host of the external database (required with `db_type: mysql`).    |
 | `db_port`    | `int(3306)`                     | Port of the external database.                                      |

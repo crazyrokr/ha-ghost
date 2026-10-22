@@ -4,12 +4,46 @@
     "config:recommended"
   ],
   "pinDigests": true,
+  "customManagers": [
+    {
+      "customType": "regex",
+      "description": "Node.js tarball version in the Ghost Dockerfile (declared once per stage)",
+      "managerFilePatterns": ["(^|/)ghost/Dockerfile$"],
+      "matchStrings": ["NODE_VERSION=v(?<currentValue>\\d+\\.\\d+\\.\\d+)"],
+      "depNameTemplate": "node",
+      "datasourceTemplate": "npm"
+    },
+    {
+      "customType": "regex",
+      "description": "Ghost CLI version (builder stage only) in the Ghost Dockerfile",
+      "managerFilePatterns": ["(^|/)ghost/Dockerfile$"],
+      "matchStrings": ["ghost-cli@(?<currentValue>\\d+\\.\\d+\\.\\d+)"],
+      "depNameTemplate": "ghost-cli",
+      "datasourceTemplate": "npm"
+    },
+    {
+      "customType": "regex",
+      "description": "Ghost application version installed at build time in the Ghost Dockerfile",
+      "managerFilePatterns": ["(^|/)ghost/Dockerfile$"],
+      "matchStrings": ["ghost install (?<currentValue>\\d+\\.\\d+\\.\\d+) local"],
+      "depNameTemplate": "ghost",
+      "datasourceTemplate": "npm"
+    }
+  ],
   "packageRules": [
     {
       "matchPackageNames": ["ghcr.io/hassio-addons/**"],
       "groupName": "base images",
       "groupSlug": "base-images",
       "schedule": ["at any time"]
+    },
+    {
+      "matchPackageNames": ["node"],
+      "allowedVersions": "^22"
+    },
+    {
+      "matchPackageNames": ["ghost"],
+      "allowedVersions": "^5"
     }
   ]
 }

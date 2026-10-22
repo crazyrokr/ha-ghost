@@ -143,10 +143,23 @@ add-on that runs [Ghost](https://ghost.org/) inside Home Assistant with:
 
 ### Access and persistence
 
-- `ingress: true` on port 2368 (side panel, no host exposure) **and**
-  `ports: 2368/tcp` (standalone). The blog front page is `/`, the admin
-  panel `/ghost/` (the admin account is created by the user in the setup
-  wizard on first visit; no credentials are baked into the add-on).
+- `ingress: true` on port 2368 **and** `ports: 2368/tcp` (standalone). The
+  blog front page is `/`, the admin panel `/ghost/` (the admin account is
+  created by the user in the setup wizard on first visit; no credentials
+  are baked into the add-on).
+- **Access at the origin root.** Ghost builds its theme and core asset
+  references relative to the site root (`getAssetUrl` resolves against the
+  configured `url`'s path; an empty `url` falls back to
+  `http://localhost:2368/`, which in a visitor's browser resolves to the
+  visitor's own machine) and its in-page API calls from the configured
+  `url`. The blog therefore must be reachable at the origin root without a
+  path prefix: the exposed port 2368 (direct `http://<host>:2368` or a
+  domain reverse-proxied onto it), with the `url` option set to that exact
+  origin. Home Assistant's built-in ingress serves the add-on under a path
+  prefix (`/api/ghost/...`): the admin panel there still renders (its
+  assets are referenced relative to the document), the front page does not
+  (its root-relative asset references 404 at the host root). This is a
+  Ghost limitation, not an add-on defect.
 - `map:` exposes `addon_config` at `/config` (writable; the blog's content
   and config live there, the application stays in the image) and `share` at
   `/share`; `tmpfs: true` keeps the container's `/tmp` (including bashio's
@@ -160,6 +173,14 @@ add-on that runs [Ghost](https://ghost.org/) inside Home Assistant with:
 - The CI workflow now targets `main` (the repository branch), the base-image
   digest pin in `.github/docker-lock.json` matches the actual `FROM`, and
   Renovate no longer carries template rules for the old add-on.
+- Renovate manages the version pins in the Dockerfile through
+  `customManagers` (regex): `NODE_VERSION` (npm `node`, limited to the 22
+  line — Ghost 5.130.6 supports `^22.13.1`, and the build only ships glibc
+  Node 22 tarballs), `ghost-cli` (npm, builder stage only), and the
+  installed Ghost application version (npm `ghost`, limited to the 5 line
+  until Ghost 6's pnpm 12 requirement is revisited). A Node update PR must
+  also refresh the two per-architecture sha256 hashes (from the nodejs.org
+  dist `SHASUMS256.txt` of the new version).
 
 ## Consequences
 
@@ -178,11 +199,13 @@ add-on that runs [Ghost](https://ghost.org/) inside Home Assistant with:
 
 ## Verification
 
-- `tests/` (Python, Given-When-Then, 43 tests): manifest/hassfest-mirror
+- `tests/` (Python, Given-When-Then, 46 tests): manifest/hassfest-mirror
   checks, Dockerfile structure (two-stage layout, build-time Ghost install
   into `/opt/ghost`, Python in the builder stage only, no package-install
   layer in the final stage, Node tarball hashes for both architectures),
-  CI/renovate/lock consistency, and behavior tests for the s6 scripts
+  CI/renovate/lock consistency (incl. the renovate custom-manager pin
+  extraction matched against the actual Dockerfile pins and the Node 22 /
+  Ghost 5 version caps), and behavior tests for the s6 scripts
   (first-boot volume setup with content seeding, legacy in-volume cleanup,
   config generation, the sqlite3 verification incl. the broken-image edge
   case, mysql option publishing, stale env clearing, service start).
