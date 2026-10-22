@@ -123,8 +123,18 @@ add-on that runs [Ghost](https://ghost.org/) inside Home Assistant with:
   reachable **at build time only**; a running container never downloads
   anything.
 
-### External database via add-on options
+### Add-on options: environment above the config file
 
+- The `url` option is published on every boot as the `url` environment
+  variable (lowercase: Ghost's nconf env source does not normalize case
+  and the config key is `url` — an uppercase `URL` would be ignored,
+  verified against the app's nconf store). This matters because the
+  config file is generated only on the first boot, before the user has
+  set the option: without the environment, a `url` set later would never
+  reach the running blog, which would keep Ghost's default
+  `http://localhost:2368/` — whose links, sitemaps, and in-page API
+  references (e.g. `members/api/member/`) resolve to the visitor's own
+  machine. An empty option clears the variable on the next boot.
 - Options `db_type` (`sqlite`|`mysql`, default `sqlite`), `db_host`,
   `db_port`, `db_user`, `db_password`, `db_name` are read with
   `bashio::config`. With `db_type: mysql` the cont-init script publishes
@@ -155,11 +165,13 @@ add-on that runs [Ghost](https://ghost.org/) inside Home Assistant with:
   `url`. The blog therefore must be reachable at the origin root without a
   path prefix: the exposed port 2368 (direct `http://<host>:2368` or a
   domain reverse-proxied onto it), with the `url` option set to that exact
-  origin. Home Assistant's built-in ingress serves the add-on under a path
-  prefix (`/api/ghost/...`): the admin panel there still renders (its
-  assets are referenced relative to the document), the front page does not
-  (its root-relative asset references 404 at the host root). This is a
-  Ghost limitation, not an add-on defect.
+  origin (the access protocol must match it: Ghost normalizes `http`
+  requests to the `url`'s protocol with a 301, so an `https` url should be
+  reached through a TLS proxy). Home Assistant's built-in ingress serves
+  the add-on under a path prefix (`/api/ghost/...`): the admin panel there
+  still renders (its assets are referenced relative to the document), the
+  front page does not (its root-relative asset references 404 at the host
+  root). This is a Ghost limitation, not an add-on defect.
 - `map:` exposes `addon_config` at `/config` (writable; the blog's content
   and config live there, the application stays in the image) and `share` at
   `/share`; `tmpfs: true` keeps the container's `/tmp` (including bashio's
@@ -199,13 +211,15 @@ add-on that runs [Ghost](https://ghost.org/) inside Home Assistant with:
 
 ## Verification
 
-- `tests/` (Python, Given-When-Then, 46 tests): manifest/hassfest-mirror
+- `tests/` (Python, Given-When-Then, 48 tests): manifest/hassfest-mirror
   checks, Dockerfile structure (two-stage layout, build-time Ghost install
   into `/opt/ghost`, Python in the builder stage only, no package-install
   layer in the final stage, Node tarball hashes for both architectures),
   CI/renovate/lock consistency (incl. the renovate custom-manager pin
   extraction matched against the actual Dockerfile pins and the Node 22 /
   Ghost 5 version caps), and behavior tests for the s6 scripts
+  (incl. the url option published/cleared through the container
+  environment with the existing config file left unrewritten)
   (first-boot volume setup with content seeding, legacy in-volume cleanup,
   config generation, the sqlite3 verification incl. the broken-image edge
   case, mysql option publishing, stale env clearing, service start).
@@ -218,4 +232,8 @@ add-on that runs [Ghost](https://ghost.org/) inside Home Assistant with:
   and database preserved); with `db_type: mysql` the same container runs
   the migrations against a real MariaDB container (75 tables) and creates
   no SQLite file; reverting the options clears the stale `database__*`
-  variables and the blog returns to SQLite.
+  variables and the blog returns to SQLite; setting the `url` option on an
+  existing volume takes effect on the next start through the container
+  environment (the config file stays unrewritten, the app references the
+  configured origin instead of `http://localhost:2368`), and resetting the
+  option clears it again.

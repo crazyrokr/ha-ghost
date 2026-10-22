@@ -77,7 +77,10 @@ a path prefix:
   `http://<host>:2368`, or put a TLS reverse proxy (Traefik, nginx, …) on a
   domain that forwards to the add-on's port, and set `url` to that exact
   origin. Without `url`, Ghost falls back to `http://localhost:2368/`,
-  whose references resolve to the visitor's own machine.
+  whose references resolve to the visitor's own machine. The option is
+  applied on every start, so changing it later needs only a restart; the
+  access protocol must match it (Ghost redirects `http` requests to the
+  `url`'s protocol).
 - **Ingress side panel.** Home Assistant serves the add-on under a path
   prefix; the admin panel (`/ghost/`) renders there, but the front page's
   root-relative asset references cannot — this is a Ghost limitation, not

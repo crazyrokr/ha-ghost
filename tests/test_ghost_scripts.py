@@ -247,13 +247,15 @@ def test_cont_sets_up_blog_on_first_boot(sandbox):
 def test_cont_generates_config_with_url_option(sandbox):
     # Given no blog exists yet and the add-on option 'url' is set
     # When the cont-init script runs
-    # Then the generated config carries the public url for Ghost
-    _, _, blog_dir, _, env = sandbox
+    # Then the generated config carries the public url for Ghost and the
+    # url option is published as the container environment variable
+    _, _, blog_dir, container_env, env = sandbox
     env = {**env, "STUB_URL": "https://blog.example.com"}
     result, _ = run_script(CONT_INIT, env, sandbox[0], shell="bash")
     assert result.returncode == 0, result.stderr
     config = (blog_dir / "config.production.json").read_text()
     assert '"url": "https://blog.example.com"' in config, config
+    assert env_value(container_env, "url") == "https://blog.example.com"
 
 
 def test_cont_removes_legacy_app_from_volume(sandbox):
@@ -348,6 +350,39 @@ def test_cont_clears_stale_database_env_on_sqlite(sandbox):
     assert database_env_files(container_env) == [], (
         f"stale database env must be cleared: {database_env_files(container_env)}"
     )
+
+
+def test_cont_publishes_url_env_for_existing_config(sandbox):
+    # Given a blog already exists (its config was generated on the first
+    # boot before the url option was set, so the file carries no url) and
+    # the user has now set the url option
+    # When the cont-init script runs
+    # Then the url option is published as the container environment
+    # variable 'url', which Ghost's config loader merges above the config
+    # file; the existing config file itself is not rewritten
+    _, _, blog_dir, container_env, env = sandbox
+    blog_dir.mkdir(parents=True, exist_ok=True)
+    (blog_dir / "content").mkdir()
+    (blog_dir / "config.production.json").write_text('{"no_url": true}', encoding="utf-8")
+    env = {**env, "STUB_URL": "https://blog.example.com"}
+    result, calls = run_script(CONT_INIT, env, sandbox[0], shell="bash")
+    assert result.returncode == 0, result.stderr
+    assert env_value(container_env, "url") == "https://blog.example.com"
+    assert not ghost_calls(calls), f"the CLI must not run for an existing blog: {calls}"
+    assert (blog_dir / "config.production.json").read_text() == '{"no_url": true}'
+
+
+def test_cont_clears_stale_url_env_when_option_empty(sandbox):
+    # Given a previous start published a url variable, but the url option
+    # is now empty (or was reset)
+    # When the cont-init script runs
+    # Then the stale url variable is cleared (Ghost falls back to its own
+    # default instead of a stale origin)
+    _, _, _, container_env, env = sandbox
+    (container_env / "url").write_text("https://stale.example.com", encoding="utf-8")
+    result, _ = run_script(CONT_INIT, env, sandbox[0], shell="bash")
+    assert result.returncode == 0, result.stderr
+    assert not (container_env / "url").exists(), "the stale url env must be cleared"
 
 
 def test_cont_fails_on_incomplete_mysql_options(sandbox):

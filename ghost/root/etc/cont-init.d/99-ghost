@@ -4,8 +4,8 @@
 # The Ghost application ships inside the image (installed at build time,
 # see the Dockerfile). This script prepares the persisted blog volume:
 # a one-time cleanup of the legacy in-volume app layout, config
-# generation on the first boot, the sqlite3 module check, and the
-# database options. Re-runs are no-ops.
+# generation on the first boot, the sqlite3 module check, and the url
+# and database options. Re-runs are no-ops.
 # GHOST_BLOG_DIR defaults to the add-on config directory.
 # ==============================================================================
 set -e
@@ -36,14 +36,14 @@ fi
 mkdir -p "$BLOG_DIR"
 ln -sfn "${APP_DIR}/current" "${BLOG_DIR}/current"
 
-if [ ! -f "$BLOG_DIR/config.production.json" ]; then
-    # Read the add-on 'url' option. bashio reports missing options as the
-    # string 'null'; normalize anything unusable to empty.
-    URL="$(bashio::config url 2>/dev/null || true)"
-    case "${URL}" in
-        "" | null | None | undefined) URL="" ;;
-    esac
+# Read the add-on 'url' option. bashio reports missing options as the
+# string 'null'; normalize anything unusable to empty.
+URL="$(bashio::config url 2>/dev/null || true)"
+case "${URL}" in
+    "" | null | None | undefined) URL="" ;;
+esac
 
+if [ ! -f "$BLOG_DIR/config.production.json" ]; then
     mkdir -p "${BLOG_DIR}/content"
     # The installer creates the content subdirectories (data, logs, ...) and
     # links the built-in themes into the blog it installs; the application
@@ -109,16 +109,28 @@ if ! runuser -u ghost -- node -e "require('${BLOG_DIR}/current/node_modules/sqli
 fi
 
 # ---------------------------------------------------------------------------
-# Database options
-# Ghost's config loader merges environment variables with a double-underscore
-# separator (the same mechanism the official Ghost docker image uses) above
-# config files, so the add-on options are published into the s6 container
-# environment, which the service script applies through with-contenv.
+# Add-on options
+# Ghost's config loader (nconf) merges environment variables above config
+# files, so the options are published into the s6 container environment,
+# which the service script applies through with-contenv. The config file
+# itself is only generated on the first boot, so the options must take
+# effect through the environment to be changeable later.
 # Without db_type=mysql the built-in sqlite database from the generated
 # config file is used.
 # ---------------------------------------------------------------------------
 CONTAINER_ENV="${CONTAINER_ENV_DIR:-/run/s6/container_environment}"
 mkdir -p "$CONTAINER_ENV"
+
+# Publish the url option as the 'url' environment variable (lowercase:
+# Ghost's nconf env source does not normalize case, and the config key is
+# 'url'; without it an unset option falls back to the Ghost default
+# http://localhost:2368, whose links and API references resolve to the
+# visitor's own machine). Cleared when the option is empty, so a reset
+# never leaves a stale origin behind.
+rm -f "${CONTAINER_ENV}/url" 2>/dev/null
+if [ -n "${URL}" ]; then
+    printf '%s' "${URL}" > "${CONTAINER_ENV}/url"
+fi
 
 DB_TYPE="$(bashio::config db_type 2>/dev/null || true)"
 case "${DB_TYPE}" in
