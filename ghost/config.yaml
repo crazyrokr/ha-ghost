@@ -37,6 +37,7 @@ options:
   mail_user: ""
   mail_password: ""
   mail_from: ""
+  log_console: true
 schema:
   url: str
   db_type: list(sqlite|mysql)
@@ -52,3 +53,4 @@ schema:
   mail_user: str
   mail_password: password
   mail_from: str
+  log_console: bool

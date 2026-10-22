@@ -35,7 +35,8 @@ MariaDB/MySQL database can be selected through the add-on options instead.
   Renovate); the Ghost CLI is used at build time only.
 - **Log in the UI.** The Ghost application log (boot, requests, errors)
   is visible in the add-on's **Log** tab; the log files themselves stay in
-  the volume at `ghost/content/logs`.
+  the volume at `ghost/content/logs`. Set `log_console` to `false` to keep
+  the log files but silence the console.
 - **aarch64 & amd64.**
 
 ## How to Install
@@ -114,12 +115,22 @@ a path prefix:
 | `mail_user`  | `str`                           | SMTP login user (optional).                                        |
 | `mail_password`| `password`                    | SMTP login password (optional).                                     |
 | `mail_from`  | `str`                           | Sender address, e.g. `Your Blog <noreply@yourdomain.com>` (Ghost falls back to a generated one without it). |
+| `log_console`| `bool`                          | Also print the application log to the container console (the add-on **Log** tab). `false` keeps the log files in the volume only. |
 
 With `db_type: mysql` the add-on starts Ghost with the
 `database__client=mysql` / `database__connection__*` environment variables
 (the same mechanism the official Ghost docker image uses), which Ghost's
 config loader merges above the generated config file. All of `db_host`,
-`db_user`, and `db_name` must be set; the add-on refuses to start otherwise.
+`db_user`, and `db_name` must be set; the add-on refuses to start
+otherwise. The generated config file carries no `database` section, and
+the built-in SQLite database is configured through the same container
+environment (`database__client=sqlite3`,
+`database__connection__filename`) — Ghost's config loader would otherwise
+merge the file's sqlite section into an external database connection and
+leak the `filename` option to it, which the mysql2 driver warns about.
+Volumes created by earlier add-on versions are migrated in place on the
+next start (only the add-on-generated section is removed; a hand-edited
+config is left as it is).
 
 With `mail_host` set the add-on starts Ghost with the `mail__transport`,
 `mail__options__*` (host, port, TLS, authentication) and `mail__from`

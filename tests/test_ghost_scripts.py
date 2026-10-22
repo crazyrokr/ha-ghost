@@ -11,6 +11,8 @@ their invocation (the fake image app is a real directory tree). This
 keeps the tests hermetic (no network, no image build, no root).
 """
 
+import json
+import shutil
 import stat
 import subprocess
 import textwrap
@@ -44,6 +46,7 @@ BASHIO_STUB = textwrap.dedent(
             mail_user)    printf '%s' "${STUB_MAIL_USER:-}" ;;
             mail_password) printf '%s' "${STUB_MAIL_PASSWORD:-}" ;;
             mail_from)    printf '%s' "${STUB_MAIL_FROM:-}" ;;
+            log_console)  printf '%s' "${STUB_LOG_CONSOLE:-null}" ;;
         esac
         return 0
     }
@@ -77,9 +80,20 @@ def sandbox_fixture(tmp_path):
     )
     # Like the real node: requiring the sqlite3 module succeeds only when the
     # package (marker file) is actually present in the referenced app tree.
-    node_stub = tmp_path / "node"
-    node_stub.write_text(
-        textwrap.dedent(
+    # The scripts also run node for the config-file migration, which must
+    # execute for real: the stub therefore hands the invocation to the
+    # host's node when one is available (the fake package above resolves
+    # under a real node exactly like the image's module), and emulates the
+    # module check from the marker otherwise.
+    host_node = shutil.which("node")
+    if host_node:
+        node_stub_body = (
+            '#!/bin/sh\n'
+            'echo "node cwd=$(pwd) NODE_ENV=${NODE_ENV:-} $@" >> "$CALL_LOG"\n'
+            f'exec "{host_node}" "$@"\n'
+        )
+    else:
+        node_stub_body = textwrap.dedent(
             """\
             #!/bin/sh
             echo "node cwd=$(pwd) NODE_ENV=${NODE_ENV:-} $@" >> "$CALL_LOG"
@@ -98,7 +112,8 @@ def sandbox_fixture(tmp_path):
             exit 0
             """
         )
-    )
+    node_stub = tmp_path / "node"
+    node_stub.write_text(node_stub_body)
     # The Ghost application as installed in the image: versions/ tree with
     # the sqlite3 module baked in, the current/ symlink, and the .ghost-cli
     # version marker.
@@ -107,6 +122,14 @@ def sandbox_fixture(tmp_path):
     (app_version / "node_modules" / "sqlite3" / "lib").mkdir(parents=True)
     (app_version / "node_modules" / "sqlite3" / "lib" / "index.js").write_text(
         "module.exports = 1\n", encoding="utf-8"
+    )
+    # A real node (the stub's delegate, see below) resolves a package
+    # directory through its manifest; without one it would look for
+    # index.js at the package root and report the module missing even with
+    # the marker present.
+    (app_version / "node_modules" / "sqlite3" / "package.json").write_text(
+        '{"name": "sqlite3", "version": "5.1.7", "main": "lib/index.js"}\n',
+        encoding="utf-8",
     )
     (app_version / "index.js").write_text("console.log('x')", encoding="utf-8")
     (app_version / "content" / "data").mkdir(parents=True)
@@ -143,6 +166,7 @@ def sandbox_fixture(tmp_path):
         "GHOST_APP_DIR": str(app_dir),
         "CONTAINER_ENV_DIR": str(container_env),
         "HOME": str(tmp_path / "root"),
+        "HOST_NODE": host_node or "",
     }
     return tmp_path, config_dir, blog_dir, container_env, env
 
@@ -221,8 +245,9 @@ def test_cont_sets_up_blog_on_first_boot(sandbox):
     # When the cont-init script runs
     # Then it never invokes the Ghost CLI (the app is pre-installed, no
     # download needed), generates the production config bound to all
-    # interfaces on port 2368 with the sqlite database, and prepares the
-    # content directory
+    # interfaces on port 2368 without a 'database' section, publishes the
+    # built-in sqlite database through the container environment, and
+    # prepares the content directory
     _, _, blog_dir, container_env, env = sandbox
     result, calls = run_script(CONT_INIT, env, sandbox[0], shell="bash")
     assert result.returncode == 0, result.stderr
@@ -241,18 +266,25 @@ def test_cont_sets_up_blog_on_first_boot(sandbox):
     config = (blog_dir / "config.production.json").read_text()
     assert '"host": "0.0.0.0"' in config, f"config must bind all interfaces: {config}"
     assert '"port": 2368' in config
-    assert '"client": "sqlite3"' in config, "sqlite must be the default database"
-    assert '"database": {' in config, "Ghost 5 reads the 'database' key, not 'db'"
+    assert '"database"' not in config, (
+        "the config file must carry no 'database' section (the database is "
+        "configured through the container environment; a file-borne sqlite "
+        "section would leak 'filename' into an external database connection): "
+        + config
+    )
     assert f'"contentPath": "{blog_dir}/content/"' in config, (
         "content must live in the persisted blog directory: " + config
-    )
-    assert f'"filename": "{blog_dir}/content/data/ghost.db"' in config, (
-        "the sqlite file must be absolute: " + config
     )
     assert '"url": "null"' not in config, (
         "bashio's 'null' placeholder must be normalized to an absent url: " + config
     )
-    assert database_env_files(container_env) == [], "no database env by default"
+    assert env_value(container_env, "database__client") == "sqlite3", (
+        "the built-in sqlite database must be published through the "
+        "container environment"
+    )
+    assert env_value(container_env, "database__connection__filename") == (
+        f"{blog_dir}/content/data/ghost.db"
+    ), "the sqlite file must be absolute"
 
 
 def test_cont_generates_config_with_url_option(sandbox):
@@ -326,8 +358,10 @@ def test_cont_publishes_mysql_env_when_selected(sandbox):
     # Given the add-on options select an external MariaDB
     # (db_type=mysql plus host, user, password, database name)
     # When the cont-init script runs
-    # Then the container environment carries the database__* variables
-    # Ghost's config loader merges above config files
+    # Then the container environment carries the mysql database__*
+    # variables Ghost's config loader merges above config files - and no
+    # 'filename' variable, which would leak into the mysql connection
+    # (the config file carries no database section either)
     _, _, _, container_env, env = sandbox
     env = {
         **env,
@@ -340,6 +374,14 @@ def test_cont_publishes_mysql_env_when_selected(sandbox):
     }
     result, _ = run_script(CONT_INIT, env, sandbox[0], shell="bash")
     assert result.returncode == 0, result.stderr
+    assert database_env_files(container_env) == [
+        "database__client",
+        "database__connection__database",
+        "database__connection__host",
+        "database__connection__password",
+        "database__connection__port",
+        "database__connection__user",
+    ], database_env_files(container_env)
     assert env_value(container_env, "database__client") == "mysql"
     assert env_value(container_env, "database__connection__host") == "db.example.com"
     assert env_value(container_env, "database__connection__port") == "3307"
@@ -352,15 +394,21 @@ def test_cont_clears_stale_database_env_on_sqlite(sandbox):
     # Given a previous start published mysql database variables, but the
     # options now select sqlite again (or the options were reset)
     # When the cont-init script runs
-    # Then no database__* variables are published (the built-in sqlite
-    # config takes effect)
+    # Then the stale mysql variables are cleared and the built-in sqlite
+    # database is published instead
     _, _, _, container_env, env = sandbox
     (container_env / "database__client").write_text("mysql", encoding="utf-8")
+    (container_env / "database__connection__host").write_text("db.example.com", encoding="utf-8")
     result, _ = run_script(CONT_INIT, env, sandbox[0], shell="bash")
     assert result.returncode == 0, result.stderr
-    assert database_env_files(container_env) == [], (
-        f"stale database env must be cleared: {database_env_files(container_env)}"
+    assert database_env_files(container_env) == [
+        "database__client",
+        "database__connection__filename",
+    ], (
+        f"stale mysql env must be cleared and the sqlite database published: "
+        f"{database_env_files(container_env)}"
     )
+    assert env_value(container_env, "database__client") == "sqlite3"
 
 
 def test_cont_publishes_url_env_for_existing_config(sandbox):
@@ -381,6 +429,109 @@ def test_cont_publishes_url_env_for_existing_config(sandbox):
     assert env_value(container_env, "url") == "https://blog.example.com"
     assert not ghost_calls(calls), f"the CLI must not run for an existing blog: {calls}"
     assert (blog_dir / "config.production.json").read_text() == '{"no_url": true}'
+
+
+def test_cont_migrates_generated_database_section_from_existing_config(sandbox):
+    # Given a blog whose config was generated by an earlier add-on version
+    # (it carries the built-in sqlite 'database' section in the file), and
+    # the user edited another part of the file since
+    # When the cont-init script runs
+    # Then the add-on-generated 'database' section is removed from the file
+    # (Ghost's config loader would merge it into an external database
+    # connection and leak the sqlite 'filename' option to it, where the
+    # mysql2 driver warns about it and will reject it in a future release)
+    # while the user's edit survives, and the built-in database is
+    # published through the container environment instead
+    _, _, blog_dir, container_env, env = sandbox
+    if not env.get("HOST_NODE"):
+        pytest.skip("no node on the test host: the config migration cannot execute")
+    blog_dir.mkdir(parents=True, exist_ok=True)
+    (blog_dir / "content").mkdir()
+    (blog_dir / "config.production.json").write_text(
+        json.dumps(
+            {
+                "server": {"host": "0.0.0.0", "port": 2368},
+                "logging": {"level": "DEBUG"},
+                "paths": {"contentPath": f"{blog_dir}/content/"},
+                "database": {
+                    "client": "sqlite3",
+                    "connection": {"filename": f"{blog_dir}/content/data/ghost.db"},
+                    "settings": {"busyRetryMax": 10000},
+                    "migrate": True,
+                },
+            },
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    result, _ = run_script(CONT_INIT, env, sandbox[0], shell="bash")
+    assert result.returncode == 0, result.stderr
+    migrated = json.loads((blog_dir / "config.production.json").read_text())
+    assert "database" not in migrated, (
+        "the add-on-generated 'database' section must be removed from the file: "
+        + json.dumps(migrated)
+    )
+    assert migrated["logging"] == {"level": "DEBUG"}, "user edits must survive the migration"
+    assert migrated["server"] == {"host": "0.0.0.0", "port": 2368}
+    assert migrated["paths"] == {"contentPath": f"{blog_dir}/content/"}
+    assert env_value(container_env, "database__client") == "sqlite3"
+    assert env_value(container_env, "database__connection__filename") == (
+        f"{blog_dir}/content/data/ghost.db"
+    )
+
+
+def test_cont_migrates_generated_database_section_only_once(sandbox):
+    # Given a config file that was already migrated (no 'database' section,
+    # re-serialized by the migration)
+    # When the cont-init script runs again
+    # Then the file is not rewritten (the migration is a no-op)
+    _, _, blog_dir, _, env = sandbox
+    if not env.get("HOST_NODE"):
+        pytest.skip("no node on the test host: the config migration cannot execute")
+    blog_dir.mkdir(parents=True, exist_ok=True)
+    (blog_dir / "content").mkdir()
+    original = json.dumps(
+        {
+            "server": {"host": "0.0.0.0", "port": 2368},
+            "logging": {"level": "DEBUG"},
+            "paths": {"contentPath": f"{blog_dir}/content/"},
+        },
+        indent=2,
+    )
+    (blog_dir / "config.production.json").write_text(original + "\n", encoding="utf-8")
+    result, _ = run_script(CONT_INIT, env, sandbox[0], shell="bash")
+    assert result.returncode == 0, result.stderr
+    assert (blog_dir / "config.production.json").read_text() == original + "\n", (
+        "an already migrated config must not be rewritten"
+    )
+
+
+def test_cont_leaves_user_edited_database_section_alone(sandbox):
+    # Given a blog whose config file carries a 'database' section the user
+    # pointed at a custom sqlite file (not the add-on-generated default)
+    # When the cont-init script runs
+    # Then the file is not rewritten (only the add-on-generated section is
+    # migrated; a hand-edited config belongs to the user)
+    _, _, blog_dir, _, env = sandbox
+    blog_dir.mkdir(parents=True, exist_ok=True)
+    (blog_dir / "content").mkdir()
+    original = json.dumps(
+        {
+            "logging": {"level": "INFO"},
+            "database": {
+                "client": "sqlite3",
+                "connection": {"filename": f"{blog_dir}/content/data/custom.db"},
+            },
+        },
+        indent=2,
+    )
+    (blog_dir / "config.production.json").write_text(original + "\n", encoding="utf-8")
+    result, _ = run_script(CONT_INIT, env, sandbox[0], shell="bash")
+    assert result.returncode == 0, result.stderr
+    assert (blog_dir / "config.production.json").read_text() == original + "\n", (
+        "a hand-edited 'database' section must not be migrated"
+    )
 
 
 def test_cont_publishes_smtp_env_when_host_configured(sandbox):
@@ -483,6 +634,36 @@ def test_cont_publishes_logging_transports_env(sandbox):
     result, _ = run_script(CONT_INIT, env, sandbox[0], shell="bash")
     assert result.returncode == 0, result.stderr
     assert env_value(container_env, "logging__transports") == '["stdout","stderr","file"]'
+
+
+def test_cont_publishes_logging_transports_when_console_explicitly_enabled(sandbox):
+    # Given the log_console option is explicitly set to true (the default)
+    # When the cont-init script runs
+    # Then the stdout, stderr and file transports are published
+    _, _, _, container_env, env = sandbox
+    env = {**env, "STUB_LOG_CONSOLE": "true"}
+    result, _ = run_script(CONT_INIT, env, sandbox[0], shell="bash")
+    assert result.returncode == 0, result.stderr
+    assert env_value(container_env, "logging__transports") == '["stdout","stderr","file"]'
+
+
+def test_cont_clears_logging_transports_when_console_disabled(sandbox):
+    # Given a previous start published the console transports, but the
+    # log_console option is now false
+    # When the cont-init script runs
+    # Then the transports variable is cleared (the application default of
+    # file-only logging applies; the log files keep being written to the
+    # volume)
+    _, _, _, container_env, env = sandbox
+    (container_env / "logging__transports").write_text(
+        '["stdout","stderr","file"]', encoding="utf-8"
+    )
+    env = {**env, "STUB_LOG_CONSOLE": "false"}
+    result, _ = run_script(CONT_INIT, env, sandbox[0], shell="bash")
+    assert result.returncode == 0, result.stderr
+    assert not (container_env / "logging__transports").exists(), (
+        "the transports variable must be cleared when console logging is disabled"
+    )
 
 
 def test_cont_clears_stale_url_env_when_option_empty(sandbox):

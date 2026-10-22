@@ -6,7 +6,10 @@ Accepted (2026-10-21). This is the single architecture record for the Ghost
 add-on; future architectural changes extend this document rather than adding
 per-change records. Updated 2026-10-21: the Ghost application moved from a
 first-boot volume install to a two-stage image build (no Python in the final
-image).
+image). Updated 2026-10-22: the database is configured entirely through the
+container environment (the generated config file carries no `database`
+section, which removes a mysql2 `filename` warning with external databases),
+and the `log_console` option was added.
 
 ## Context
 
@@ -63,7 +66,10 @@ add-on that runs [Ghost](https://ghost.org/) inside Home Assistant with:
   persisted `content/` from the image's `content/` tree (the installer
   creates the subdirectories and links the built-in themes; without them the
   SQLite database could not be created and Ghost would exit silently) and
-  writes `config.production.json` once. Reboots never rewrite the config.
+  writes `config.production.json` once, without a `database` section (see
+  Add-on options below). Reboots never rewrite the config, except the
+  one-time removal of the add-on-generated `database` section from files
+  written by earlier add-on versions (see there as well).
 - Ghost CLI refuses to run as root while the container runs as root, so a
   dedicated `ghost` user owns the blog volume; the long-running process is
   started with the base image's built-in `runuser` (no su-exec package).
@@ -137,15 +143,45 @@ add-on that runs [Ghost](https://ghost.org/) inside Home Assistant with:
   machine. An empty option clears the variable on the next boot.
 - Options `db_type` (`sqlite`|`mysql`, default `sqlite`), `db_host`,
   `db_port`, `db_user`, `db_password`, `db_name` are read with
-  `bashio::config`. With `db_type: mysql` the cont-init script publishes
-  `database__client`, `database__connection__host`, `...__port`,
-  `...__user`, `...__password`, `...__database` into the s6 container
-  environment (`/run/s6/container_environment`), which the service applies
-  through `with-contenv`. Ghost's nconf loader merges those variables above
-  the config file — the same mechanism the official Ghost docker image
-  uses — so no config file editing is needed, and switching the options
-  back to `sqlite` (the variables are cleared on every boot) restores the
-  built-in database.
+  `bashio::config`. **The database is configured entirely through the
+  container environment** (`/run/s6/container_environment`, applied by the
+  service through `with-contenv`): with `db_type: mysql` the cont-init
+  script publishes `database__client=mysql`, `database__connection__host`,
+  `...__port`, `...__user`, `...__password`, `...__database` (the same
+  mechanism the official Ghost docker image uses); otherwise it publishes
+  the built-in database instead — `database__client=sqlite3` and
+  `database__connection__filename` (the blog volume's `ghost.db`). Without
+  the variables the application's own default (an unreachable local mysql)
+  would apply. All `database__*` variables are cleared on every boot and
+  republished from the options, so switching between the backends is a
+  restart.
+- **Why the config file carries no `database` section.** Ghost's nconf
+  loader merges the `database` object of *every* store (the config file,
+  the container environment, the application's default config) into one on
+  every `get('database')` call, and a file-borne section cannot be removed
+  through the environment again: nconf re-merges from the file on each
+  access (`this.clear` does not work — nconf#235), so the delete+set in
+  Ghost's own `sanitizeDatabaseProperties` (added for exactly this
+  situation) does not persist. The earlier generated config carried a
+  sqlite `database` section, so with `db_type: mysql` the sqlite
+  `filename` connection option leaked into the merged connection object
+  and the mysql2 driver printed
+  `Ignoring invalid configuration option passed to Connection: filename`
+  (a warning today, an error in a future mysql2 release). Verified against
+  the Ghost 5.130.6 source (`core/server/data/db/connection.js` passes the
+  merged object to knex; `shared/config/utils.js` carries the ineffective
+  sanitizer) and the nconf 0.13.0 merge behavior. New config files are
+  therefore written without the section, and volumes created by earlier
+  add-on versions are migrated in place on the next start: a node
+  one-liner removes the section from `config.production.json` only while
+  it still matches the add-on-generated default (a built-in sqlite client
+  whose connection holds exactly the add-on's default database file) — a
+  config the user edited by hand is left untouched, and the built-in
+  database is published through the environment instead. The `settings`
+  (`busyRetryMax`) and `migrate` keys the old section carried are dropped
+  as well: Ghost 5.130.6 reads neither (migrations run unconditionally,
+  and `useNullAsDefault` plus the sqlite pool are added by Ghost's own
+  `configure()`).
 - With `db_type: mysql`, all of `db_host`, `db_user`, `db_name` must be set;
   otherwise the add-on refuses to start (a half-configured external
   database would otherwise leave the blog on the built-in one while the
@@ -160,6 +196,15 @@ add-on that runs [Ghost](https://ghost.org/) inside Home Assistant with:
   published — fixing the "Missing mail.from" fallback without changing
   delivery. All `mail__*` variables are cleared on every boot, so a reset
   restores the app defaults.
+- Option `log_console` (`bool`, default `true`): with it on, the
+  cont-init script publishes `logging__transports=["stdout","stderr","file"]`
+  on every start — the application's production default is file-only, and
+  the environment merges above the config file, so the application log is
+  printed to the container console (what the add-on log tab and
+  `docker logs` show) as well as to the files. With it off the variable is
+  cleared and only the application default (the file transport) remains:
+  the log files in the volume keep the application log, and the console
+  carries only s6 status lines.
 
 ### Access and persistence
 
@@ -223,7 +268,10 @@ add-on that runs [Ghost](https://ghost.org/) inside Home Assistant with:
   network-free first boot, a ~1.2 MB persisted volume (smaller HA backups),
   and add-on updates that deliver new Ghost versions without any user
   action. Volumes written by earlier add-on versions are migrated in place
-  on the first start.
+  on the first start, now including the one-time removal of the
+  add-on-generated `database` section from the config file (content and
+  everything else in the file are preserved; a hand-edited file is left
+  untouched).
 - Ghost is pinned to the 5.x line (5.130.6); moving to Ghost 6 requires
   revisiting the Node/pnpm decision.
 - Because bashio caches add-on options in `/tmp`, `tmpfs: true` is required
@@ -231,18 +279,21 @@ add-on that runs [Ghost](https://ghost.org/) inside Home Assistant with:
 
 ## Verification
 
-- `tests/` (Python, Given-When-Then, 53 tests): manifest/hassfest-mirror
+- `tests/` (Python, Given-When-Then, 58 tests): manifest/hassfest-mirror
   checks, Dockerfile structure (two-stage layout, build-time Ghost install
   into `/opt/ghost`, Python in the builder stage only, no package-install
   layer in the final stage, Node tarball hashes for both architectures),
   CI/renovate/lock consistency (incl. the renovate custom-manager pin
   extraction matched against the actual Dockerfile pins and the Node 22 /
   Ghost 5 version caps), and behavior tests for the s6 scripts
-  (incl. the url option published/cleared through the container
-  environment with the existing config file left unrewritten)
-  (first-boot volume setup with content seeding, legacy in-volume cleanup,
-  config generation, the sqlite3 verification incl. the broken-image edge
-  case, mysql option publishing, stale env clearing, service start).
+  (first-boot volume setup with content seeding and config generation
+  without a `database` section, legacy in-volume cleanup, the config-file
+  migration of the add-on-generated `database` section — incl. the
+  user-edited-file guard and the idempotent re-run — the sqlite3
+  verification incl. the broken-image edge case, the sqlite and mysql
+  option publishing (the mysql set without a `filename` variable),
+  `log_console` on/off with stale-variable clearing, url/mail option
+  publishing and clearing, service start).
 - End-to-end in Docker: an add-on container with the real s6 init against a
   fake supervisor — a fresh volume boots with the image-resident
   application, creates `content/data/ghost.db`, and serves `/` and
@@ -262,3 +313,17 @@ add-on that runs [Ghost](https://ghost.org/) inside Home Assistant with:
   member magic-link request is delivered through an external SMTP server
   (a fake one in the test) with the configured from address, and resetting
   the mail options clears the mail__* variables again.
+- Re-verified in Docker against the real s6 init and a fake supervisor
+  (2026-10-22, the database and logging changes): a fresh volume with
+  `db_type: mysql` runs the migrations against a real MariaDB container
+  (75 tables), creates no SQLite file, and the container console carries
+  no `Ignoring invalid configuration option passed to Connection:
+  filename` warning (with the config file as written by earlier add-on
+  versions the warning did appear); a volume whose config still carried
+  the add-on-generated sqlite `database` section is migrated in place on
+  the next start (the section removed, the rest of the file preserved)
+  and the blog runs on the selected database in both the mysql and the
+  sqlite case; with `log_console: false` the container console carries no
+  application log lines while the log files in the volume keep them; and
+  a restart of a mysql-configured container boots in ~1 s without the
+  warning.
