@@ -176,6 +176,16 @@ add-on that runs [Ghost](https://ghost.org/) inside Home Assistant with:
   and config live there, the application stays in the image) and `share` at
   `/share`; `tmpfs: true` keeps the container's `/tmp` (including bashio's
   option cache) fresh on every start, so option changes always take effect.
+- **Application log in the add-on log.** Ghost's production default logs
+  to file only (`transports: ["file"]` in the app's production config),
+  one file per origin in the volume's `content/logs`; the container
+  console — what the add-on log tab and `docker logs` show — would carry
+  only s6 status lines. The cont-init script therefore publishes
+  `logging__transports=["stdout","stderr","file"]` into the container
+  environment on every start (the environment merges above the config
+  file, so existing volumes get console logs on the next start without a
+  config rewrite; s6 longrun services without a `log/` directory print
+  directly to the container console, verified with a probe service).
 
 ### CI/CD and metadata hygiene
 
@@ -211,7 +221,7 @@ add-on that runs [Ghost](https://ghost.org/) inside Home Assistant with:
 
 ## Verification
 
-- `tests/` (Python, Given-When-Then, 48 tests): manifest/hassfest-mirror
+- `tests/` (Python, Given-When-Then, 49 tests): manifest/hassfest-mirror
   checks, Dockerfile structure (two-stage layout, build-time Ghost install
   into `/opt/ghost`, Python in the builder stage only, no package-install
   layer in the final stage, Node tarball hashes for both architectures),
@@ -236,4 +246,6 @@ add-on that runs [Ghost](https://ghost.org/) inside Home Assistant with:
   existing volume takes effect on the next start through the container
   environment (the config file stays unrewritten, the app references the
   configured origin instead of `http://localhost:2368`), and resetting the
-  option clears it again.
+  option clears it again; the container console (what the add-on log tab
+  shows) carries the application log — boot, requests, errors — while the
+  log files are still written to the volume.

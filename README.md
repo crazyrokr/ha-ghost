@@ -33,6 +33,9 @@ MariaDB/MySQL database can be selected through the add-on options instead.
 - **Reproducible image.** The base image is digest-pinned and the Ghost /
   Ghost CLI / Node versions are pinned in the build (kept current by
   Renovate); the Ghost CLI is used at build time only.
+- **Log in the UI.** The Ghost application log (boot, requests, errors)
+  is visible in the add-on's **Log** tab; the log files themselves stay in
+  the volume at `ghost/content/logs`.
 - **aarch64 & amd64.**
 
 ## How to Install

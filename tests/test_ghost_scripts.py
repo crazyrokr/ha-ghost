@@ -372,6 +372,19 @@ def test_cont_publishes_url_env_for_existing_config(sandbox):
     assert (blog_dir / "config.production.json").read_text() == '{"no_url": true}'
 
 
+def test_cont_publishes_logging_transports_env(sandbox):
+    # Given Ghost's production default logs to file only (so the add-on
+    # log tab would show no application log at all)
+    # When the cont-init script runs
+    # Then the container environment carries the transports stdout,
+    # stderr and file, so the application log is printed to the
+    # container console (the add-on log tab) as well as to the files
+    _, _, _, container_env, env = sandbox
+    result, _ = run_script(CONT_INIT, env, sandbox[0], shell="bash")
+    assert result.returncode == 0, result.stderr
+    assert env_value(container_env, "logging__transports") == '["stdout","stderr","file"]'
+
+
 def test_cont_clears_stale_url_env_when_option_empty(sandbox):
     # Given a previous start published a url variable, but the url option
     # is now empty (or was reset)

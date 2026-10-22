@@ -132,6 +132,14 @@ if [ -n "${URL}" ]; then
     printf '%s' "${URL}" > "${CONTAINER_ENV}/url"
 fi
 
+# Publish the logging transports: the application's production default
+# is file-only, and the environment merges above the config file, so the
+# application log is printed to the container console - what the add-on
+# log tab and `docker logs` show - on every start, new or existing
+# volumes alike (the service's stdout reaches the container console
+# because the s6 service has no log/ directory).
+printf '%s' '["stdout","stderr","file"]' > "${CONTAINER_ENV}/logging__transports"
+
 DB_TYPE="$(bashio::config db_type 2>/dev/null || true)"
 case "${DB_TYPE}" in
     "" | null | None | undefined) DB_TYPE="sqlite" ;;
