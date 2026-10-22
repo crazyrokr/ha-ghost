@@ -69,6 +69,13 @@ MariaDB/MySQL database can be selected through the add-on options instead.
    `db_password`, and `db_name`, then restart the add-on. Reverting to
    `sqlite` switches the blog back to its built-in database.
 
+6. **(Optional) Email delivery.** In **Settings → add-on configuration**
+   set `mail_host`, `mail_port`, `mail_secure`, `mail_user`,
+   `mail_password` of your SMTP relay plus `mail_from` (the sender address
+   your provider accepts), then restart the add-on — member magic links,
+   password resets, and notifications are then delivered through that
+   relay.
+
 ## Access
 
 Ghost serves its theme and core assets relative to the site root and builds
@@ -100,12 +107,26 @@ a path prefix:
 | `db_user`    | `str`                           | User of the external database (required with `db_type: mysql`).    |
 | `db_password`| `password`                      | Password of the external database.                                  |
 | `db_name`    | `str`                           | Name of the external database (required with `db_type: mysql`).    |
+| `mail_transport`| `choice(SMTP, direct, default=SMTP)` | Mail delivery: via the SMTP relay from the options, or Ghost's built-in direct sending. |
+| `mail_host`  | `str`                           | Host of the SMTP relay (enables mail delivery; without it the built-in transport is kept). |
+| `mail_port`  | `int(587)`                      | Port of the SMTP relay.                                             |
+| `mail_secure`| `bool`                          | Use TLS for the SMTP connection (true for port 465).               |
+| `mail_user`  | `str`                           | SMTP login user (optional).                                        |
+| `mail_password`| `password`                    | SMTP login password (optional).                                     |
+| `mail_from`  | `str`                           | Sender address, e.g. `Your Blog <noreply@yourdomain.com>` (Ghost falls back to a generated one without it). |
 
 With `db_type: mysql` the add-on starts Ghost with the
 `database__client=mysql` / `database__connection__*` environment variables
 (the same mechanism the official Ghost docker image uses), which Ghost's
 config loader merges above the generated config file. All of `db_host`,
 `db_user`, and `db_name` must be set; the add-on refuses to start otherwise.
+
+With `mail_host` set the add-on starts Ghost with the `mail__transport`,
+`mail__options__*` (host, port, TLS, authentication) and `mail__from`
+environment variables, merged the same way; without it the built-in direct
+transport is kept (with `mail__from` if set). Point these at the SMTP relay
+your host or provider gives you so that member magic links, password
+resets, and notifications can be delivered.
 
 ## Persistence
 

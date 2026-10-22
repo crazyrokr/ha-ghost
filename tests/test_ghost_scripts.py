@@ -37,6 +37,13 @@ BASHIO_STUB = textwrap.dedent(
             db_user)    printf '%s' "${STUB_DB_USER:-}" ;;
             db_password) printf '%s' "${STUB_DB_PASSWORD:-}" ;;
             db_name)    printf '%s' "${STUB_DB_NAME:-}" ;;
+            mail_transport) printf '%s' "${STUB_MAIL_TRANSPORT:-null}" ;;
+            mail_host)    printf '%s' "${STUB_MAIL_HOST:-}" ;;
+            mail_port)    printf '%s' "${STUB_MAIL_PORT:-null}" ;;
+            mail_secure)  printf '%s' "${STUB_MAIL_SECURE:-false}" ;;
+            mail_user)    printf '%s' "${STUB_MAIL_USER:-}" ;;
+            mail_password) printf '%s' "${STUB_MAIL_PASSWORD:-}" ;;
+            mail_from)    printf '%s' "${STUB_MAIL_FROM:-}" ;;
         esac
         return 0
     }
@@ -178,6 +185,10 @@ def node_calls(calls):
 
 def database_env_files(container_env: Path):
     return sorted(p.name for p in container_env.glob("database__*"))
+
+
+def mail_env_files(container_env: Path):
+    return sorted(p.name for p in container_env.glob("mail__*"))
 
 
 def env_value(container_env: Path, name: str):
@@ -370,6 +381,95 @@ def test_cont_publishes_url_env_for_existing_config(sandbox):
     assert env_value(container_env, "url") == "https://blog.example.com"
     assert not ghost_calls(calls), f"the CLI must not run for an existing blog: {calls}"
     assert (blog_dir / "config.production.json").read_text() == '{"no_url": true}'
+
+
+def test_cont_publishes_smtp_env_when_host_configured(sandbox):
+    # Given the add-on options configure an SMTP relay (transport, host,
+    # non-default port, TLS, credentials and the from address)
+    # When the cont-init script runs
+    # Then the container environment carries the mail settings Ghost's
+    # config loader merges above the config file
+    _, _, _, container_env, env = sandbox
+    env = {
+        **env,
+        "STUB_MAIL_TRANSPORT": "SMTP",
+        "STUB_MAIL_HOST": "smtp.example.com",
+        "STUB_MAIL_PORT": "465",
+        "STUB_MAIL_SECURE": "true",
+        "STUB_MAIL_USER": "me@example.com",
+        "STUB_MAIL_PASSWORD": "secret",
+        "STUB_MAIL_FROM": "Ghost Blog <noreply@example.com>",
+    }
+    result, _ = run_script(CONT_INIT, env, sandbox[0], shell="bash")
+    assert result.returncode == 0, result.stderr
+    assert mail_env_files(container_env) == [
+        "mail__from",
+        "mail__options__auth__pass",
+        "mail__options__auth__user",
+        "mail__options__host",
+        "mail__options__port",
+        "mail__options__secure",
+        "mail__transport",
+    ], mail_env_files(container_env)
+    assert env_value(container_env, "mail__transport") == "SMTP"
+    assert env_value(container_env, "mail__options__host") == "smtp.example.com"
+    assert env_value(container_env, "mail__options__port") == "465"
+    assert env_value(container_env, "mail__options__secure") == "true"
+    assert env_value(container_env, "mail__options__auth__user") == "me@example.com"
+    assert env_value(container_env, "mail__options__auth__pass") == "secret"
+    assert env_value(container_env, "mail__from") == "Ghost Blog <noreply@example.com>"
+
+
+def test_cont_publishes_smtp_without_credentials_when_host_set(sandbox):
+    # Given only the SMTP host (and port) is configured - no TLS, no
+    # credentials, no from address
+    # When the cont-init script runs
+    # Then the transport and connection variables are published, but no
+    # secure/authentication variables (Ghost/nodemailer defaults apply)
+    _, _, _, container_env, env = sandbox
+    env = {**env, "STUB_MAIL_HOST": "smtp.example.com", "STUB_MAIL_PORT": "25"}
+    result, _ = run_script(CONT_INIT, env, sandbox[0], shell="bash")
+    assert result.returncode == 0, result.stderr
+    assert mail_env_files(container_env) == [
+        "mail__options__host",
+        "mail__options__port",
+        "mail__transport",
+    ], mail_env_files(container_env)
+    assert env_value(container_env, "mail__transport") == "SMTP"
+    assert env_value(container_env, "mail__options__port") == "25"
+
+
+def test_cont_publishes_only_from_without_host(sandbox):
+    # Given only the from address is configured (no SMTP host)
+    # When the cont-init script runs
+    # Then only mail__from is published: the built-in direct transport is
+    # kept, with the configured sender address
+    _, _, _, container_env, env = sandbox
+    env = {**env, "STUB_MAIL_FROM": "Ghost Blog <noreply@example.com>"}
+    result, _ = run_script(CONT_INIT, env, sandbox[0], shell="bash")
+    assert result.returncode == 0, result.stderr
+    assert mail_env_files(container_env) == ["mail__from"], mail_env_files(container_env)
+    assert env_value(container_env, "mail__from") == "Ghost Blog <noreply@example.com>"
+
+
+def test_cont_clears_stale_mail_env_when_options_reset(sandbox):
+    # Given a previous start published mail variables (SMTP host and
+    # from address), but the options were reset since
+    # When the cont-init script runs
+    # Then all mail variables are cleared (the built-in direct transport
+    # with the app-default from address takes effect again)
+    _, _, _, container_env, env = sandbox
+    for name, value in (
+        ("mail__transport", "SMTP"),
+        ("mail__options__host", "smtp.example.com"),
+        ("mail__from", "Ghost Blog <noreply@example.com>"),
+    ):
+        (container_env / name).write_text(value, encoding="utf-8")
+    result, _ = run_script(CONT_INIT, env, sandbox[0], shell="bash")
+    assert result.returncode == 0, result.stderr
+    assert mail_env_files(container_env) == [], (
+        f"stale mail env must be cleared: {mail_env_files(container_env)}"
+    )
 
 
 def test_cont_publishes_logging_transports_env(sandbox):

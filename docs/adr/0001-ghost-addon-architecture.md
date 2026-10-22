@@ -150,6 +150,16 @@ add-on that runs [Ghost](https://ghost.org/) inside Home Assistant with:
   otherwise the add-on refuses to start (a half-configured external
   database would otherwise leave the blog on the built-in one while the
   user believes it is external).
+- The mail options (`mail_transport`, `mail_host`, `mail_port`,
+  `mail_secure`, `mail_user`, `mail_password`, `mail_from`) are published
+  the same way: with `mail_host` set, `mail__transport`,
+  `mail__options__host`, `...__port`, and — when set — `...__secure`,
+  `...__auth__user`, `...__auth__pass` (Ghost's mail config is
+  `mail.from`, `mail.transport`, `mail.options`); without a host the
+  built-in `direct` transport is kept and only `mail__from` (when set) is
+  published — fixing the "Missing mail.from" fallback without changing
+  delivery. All `mail__*` variables are cleared on every boot, so a reset
+  restores the app defaults.
 
 ### Access and persistence
 
@@ -221,7 +231,7 @@ add-on that runs [Ghost](https://ghost.org/) inside Home Assistant with:
 
 ## Verification
 
-- `tests/` (Python, Given-When-Then, 49 tests): manifest/hassfest-mirror
+- `tests/` (Python, Given-When-Then, 53 tests): manifest/hassfest-mirror
   checks, Dockerfile structure (two-stage layout, build-time Ghost install
   into `/opt/ghost`, Python in the builder stage only, no package-install
   layer in the final stage, Node tarball hashes for both architectures),
@@ -248,4 +258,7 @@ add-on that runs [Ghost](https://ghost.org/) inside Home Assistant with:
   configured origin instead of `http://localhost:2368`), and resetting the
   option clears it again; the container console (what the add-on log tab
   shows) carries the application log — boot, requests, errors — while the
-  log files are still written to the volume.
+  log files are still written to the volume; with the mail options set, a
+  member magic-link request is delivered through an external SMTP server
+  (a fake one in the test) with the configured from address, and resetting
+  the mail options clears the mail__* variables again.

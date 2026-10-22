@@ -30,6 +30,13 @@ options:
   db_user: ""
   db_password: ""
   db_name: ""
+  mail_transport: SMTP
+  mail_host: ""
+  mail_port: 587
+  mail_secure: false
+  mail_user: ""
+  mail_password: ""
+  mail_from: ""
 schema:
   url: str
   db_type: list(sqlite|mysql)
@@ -38,3 +45,10 @@ schema:
   db_user: str
   db_password: password
   db_name: str
+  mail_transport: list(SMTP|direct)
+  mail_host: str
+  mail_port: int
+  mail_secure: bool
+  mail_user: str
+  mail_password: password
+  mail_from: str

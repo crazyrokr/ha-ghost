@@ -4,8 +4,8 @@
 # The Ghost application ships inside the image (installed at build time,
 # see the Dockerfile). This script prepares the persisted blog volume:
 # a one-time cleanup of the legacy in-volume app layout, config
-# generation on the first boot, the sqlite3 module check, and the url
-# and database options. Re-runs are no-ops.
+# generation on the first boot, the sqlite3 module check, and the url,
+# mail, and database options. Re-runs are no-ops.
 # GHOST_BLOG_DIR defaults to the add-on config directory.
 # ==============================================================================
 set -e
@@ -180,4 +180,65 @@ if [ "${DB_TYPE}" = "mysql" ]; then
     printf '%s' "${DB_USER}"           > "${CONTAINER_ENV}/database__connection__user"
     printf '%s' "${DB_PASSWORD}"       > "${CONTAINER_ENV}/database__connection__password"
     printf '%s' "${DB_NAME}"           > "${CONTAINER_ENV}/database__connection__database"
+fi
+
+# ---------------------------------------------------------------------------
+# Mail options
+# Same mechanism as the database options: the variables are published into
+# the s6 container environment, which Ghost's config loader merges above
+# the config file. Ghost's mail settings are mail.from, mail.transport
+# and mail.options (host, port, secure, authentication). With mail_host
+# set the SMTP connection is published; without it the built-in direct
+# transport is kept (only mail__from, when set, is published).
+# ---------------------------------------------------------------------------
+MAIL_TRANSPORT="$(bashio::config mail_transport 2>/dev/null || true)"
+case "${MAIL_TRANSPORT}" in
+    "" | null | None | undefined) MAIL_TRANSPORT="SMTP" ;;
+esac
+MAIL_HOST="$(bashio::config mail_host 2>/dev/null || true)"
+case "${MAIL_HOST}" in
+    "" | null | None | undefined) MAIL_HOST="" ;;
+esac
+MAIL_PORT="$(bashio::config mail_port 2>/dev/null || true)"
+case "${MAIL_PORT}" in
+    "" | null | None | undefined) MAIL_PORT="587" ;;
+esac
+MAIL_SECURE="$(bashio::config mail_secure 2>/dev/null || true)"
+case "${MAIL_SECURE}" in
+    true | True | TRUE | 1) MAIL_SECURE="true" ;;
+    *) MAIL_SECURE="false" ;;
+esac
+MAIL_USER="$(bashio::config mail_user 2>/dev/null || true)"
+case "${MAIL_USER}" in
+    "" | null | None | undefined) MAIL_USER="" ;;
+esac
+MAIL_PASSWORD="$(bashio::config mail_password 2>/dev/null || true)"
+case "${MAIL_PASSWORD}" in
+    "" | null | None | undefined) MAIL_PASSWORD="" ;;
+esac
+MAIL_FROM="$(bashio::config mail_from 2>/dev/null || true)"
+case "${MAIL_FROM}" in
+    "" | null | None | undefined) MAIL_FROM="" ;;
+esac
+
+# Drop previously published variables: options may have been changed or
+# reverted since the last start.
+rm -f "${CONTAINER_ENV}/mail__"* 2>/dev/null
+
+if [ -n "${MAIL_HOST}" ]; then
+    printf '%s' "${MAIL_TRANSPORT}"  > "${CONTAINER_ENV}/mail__transport"
+    printf '%s' "${MAIL_HOST}"       > "${CONTAINER_ENV}/mail__options__host"
+    printf '%s' "${MAIL_PORT}"       > "${CONTAINER_ENV}/mail__options__port"
+    if [ "${MAIL_SECURE}" = "true" ]; then
+        printf '%s' "true"           > "${CONTAINER_ENV}/mail__options__secure"
+    fi
+    if [ -n "${MAIL_USER}" ]; then
+        printf '%s' "${MAIL_USER}"   > "${CONTAINER_ENV}/mail__options__auth__user"
+    fi
+    if [ -n "${MAIL_PASSWORD}" ]; then
+        printf '%s' "${MAIL_PASSWORD}" > "${CONTAINER_ENV}/mail__options__auth__pass"
+    fi
+fi
+if [ -n "${MAIL_FROM}" ]; then
+    printf '%s' "${MAIL_FROM}" > "${CONTAINER_ENV}/mail__from"
 fi
