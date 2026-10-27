@@ -8,7 +8,7 @@
 FROM ghcr.io/hassio-addons/debian-base:32770e4@sha256:c16befd0489d0f873f66b41c1d028b8978dea70c93b606e9b1cf237c17b7abca AS node
 
 ARG BUILD_ARCH
-ARG NODE_VERSION=v22.23.3
+ARG NODE_VERSION=v22.23.4
 RUN set -e; \
     BUILD_ARCH="${BUILD_ARCH:-amd64}"; \
     if [ "${BUILD_ARCH}" = "amd64" ]; then \
