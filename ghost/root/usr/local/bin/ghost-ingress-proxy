@@ -234,6 +234,31 @@ function appendVary(headers, token) {
     headers.vary = values.join(', ');
 }
 
+// Ghost scopes its admin session cookie to '<subdir>/ghost' (see
+// express-session.js: path = urlUtils.getSubdir() + '/ghost'). At the
+// origin root that path is /ghost and matches the browser's requests, but
+// under ingress the request path is '<prefix>/ghost/...', which does not
+// start with /ghost - so the browser would never send the session cookie
+// back and every authenticated admin request (including 2FA verification)
+// would arrive session-less. Move non-root cookie paths under the prefix.
+function rewriteCookiePath(cookie, context) {
+    return String(cookie).replace(
+        /(;\s*path=)(?:"([^"]*)"|([^;]*))/i,
+        (match, lead, quoted, plain) => {
+            const path = (quoted !== undefined ? quoted : plain).trim();
+            if (
+                !path.startsWith('/')
+                || path === '/'
+                || path.startsWith(`${context.prefix}/`)
+            ) {
+                return match;
+            }
+            const rewritten = context.prefix + path;
+            return quoted !== undefined ? `${lead}"${rewritten}"` : lead + rewritten;
+        }
+    );
+}
+
 function responseHeaders(upstreamResponse, options) {
     const headers = {};
     for (const [name, value] of Object.entries(upstreamResponse.headers)) {
@@ -249,6 +274,11 @@ function responseHeaders(upstreamResponse, options) {
         if (headers.location !== undefined) {
             headers.location = rewriteLocation(String(headers.location), options.context);
         }
+        if (headers['set-cookie'] !== undefined) {
+            headers['set-cookie'] = [].concat(headers['set-cookie']).map(
+                (cookie) => rewriteCookiePath(cookie, options.context)
+            );
+        }
         appendVary(headers, 'X-Ingress-Path');
     }
     if (options.gzip) {
@@ -258,7 +288,7 @@ function responseHeaders(upstreamResponse, options) {
     return headers;
 }
 
-function upstreamHeaders(request) {
+function upstreamHeaders(request, context) {
     const headers = {};
     for (const [name, value] of Object.entries(request.headers)) {
         if (HOP_BY_HOP_HEADERS.has(name)) {
@@ -269,6 +299,23 @@ function upstreamHeaders(request) {
     // Bodies are decoded by the proxy so rewritten responses can be edited;
     // the client-facing compression is applied by the proxy itself.
     headers['accept-encoding'] = 'identity';
+    // Home Assistant serves its pages with 'Referrer-Policy: no-referrer',
+    // so the admin page's requests carry no Referer, and same-origin GET
+    // requests carry no Origin either. Ghost derives the request origin
+    // from those headers and falls back to the configured site URL, which
+    // differs from the origin stored in the session at login (the Home
+    // Assistant origin) - its CSRF check then rejects the request with
+    // "Request made from incorrect origin". Supply the browser-facing
+    // origin the client would have sent when neither header is present.
+    if (
+        context
+        && context.origin
+        && headers.origin === undefined
+        && headers.referer === undefined
+        && headers.referrer === undefined
+    ) {
+        headers.referer = `${context.origin}${context.prefix}/`;
+    }
     return headers;
 }
 
@@ -383,7 +430,7 @@ const server = http.createServer((request, response) => {
             port: UPSTREAM.port,
             method: request.method,
             path: request.url,
-            headers: upstreamHeaders(request)
+            headers: upstreamHeaders(request, context)
         },
         (upstreamResponse) => handleResponse(request, response, upstreamResponse, context)
     );

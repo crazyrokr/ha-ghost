@@ -309,6 +309,40 @@ add-on that runs [Ghost](https://ghost.org/) inside Home Assistant with:
   through rather than corrupted), bodyless 204/304 responses, HEAD
   requests, and WebSocket upgrades (tunnelled). Requests without the
   ingress header never enter the rewriting path.
+- **Session cookies.** Ghost scopes its admin session cookie to
+  `<subdir>/ghost` (`express-session.js`: `path = urlUtils.getSubdir() +
+  '/ghost'`, i.e. `/ghost` at the origin root), which never matches the
+  ingress request paths (`<prefix>/ghost/...`). The browser therefore did
+  not return the cookie on the next request, the admin session was lost,
+  and email 2FA verification failed with HTTP 401 "Your verification code
+  is incorrect" (`otp.verify` received `undefined` as the session user id;
+  the emailed code itself is sent during the login request, which is why
+  the email still arrived). The proxy rewrites the `Path` attribute of
+  every non-root cookie on ingress responses (rewritten and pass-through
+  alike) to `<prefix><path>`; root paths (`Path=/`) already match every
+  path and are left alone, and an already-prefixed path is not rewritten
+  twice. The prefix contains the add-on's persisted ingress token
+  (`supervisor/apps/validate.py` defaults `ingress_token` through
+  `secrets.token_urlsafe` and stores it once per install), so the scoped
+  admin session survives sessions, Home Assistant restarts and add-on
+  restarts; only a reinstall changes it. Cookies are left untouched for
+  direct-port requests.
+- **Request origin.** Home Assistant's HTTP middleware adds
+  `Referrer-Policy: no-referrer` to every response
+  (`homeassistant/components/http/headers.py`), including the ingress
+  panel page, so the browser sends no `Referer` with the admin app's
+  requests; same-origin GET requests carry no `Origin` either. Ghost's
+  origin check (`cookieCsrfProtection` in `session-service.js`) derives
+  the request origin from `Origin`/`Referer` and falls back to the
+  configured site URL, which differs from the origin stored in the
+  session at login (the Home Assistant origin). It then answers
+  `400 Request made from incorrect origin` (e.g. `Expected
+  'https://ha.example.com' received 'https://blog.example.com'`), and the
+  admin UI bounces back to the login page. For ingress requests that
+  carry neither header, the proxy supplies
+  `Referer: <session origin><prefix>/` - the origin the browser would
+  otherwise have sent - so the check matches. Existing `Origin`/`Referer`
+  values are never overridden, and direct-port requests are untouched.
 - **Response hygiene.** Rewritten responses drop the upstream `ETag`
   (the body differs per request), recompute `Content-Length`, add
   `Vary: X-Ingress-Path`, and are gzipped when the browser accepts it.
@@ -388,7 +422,7 @@ add-on that runs [Ghost](https://ghost.org/) inside Home Assistant with:
 
 ## Verification
 
-- `tests/` (Python, Given-When-Then, 91 tests; run by CI before any build):
+- `tests/` (Python, Given-When-Then, 99 tests; run by CI before any build):
   manifest/hassfest-mirror
   checks, Dockerfile structure (multi-stage layout with the Node pin in the
   shared `node` stage, build-time Ghost install into `/opt/ghost`, Python in
@@ -414,7 +448,13 @@ add-on that runs [Ghost](https://ghost.org/) inside Home Assistant with:
   POST bodies/query strings, 502 on an unreachable upstream, ETag/Vary
   handling, and manifest/service/packaging consistency — incl. the
   `ingress_entry`/`webui` admin-panel entry and the ingress port matching
-  the proxy default).
+  the proxy default). The cookie tests cover the admin session path being
+  scoped to the ingress prefix (the 2FA/login regression), root paths and
+  already-prefixed paths being left alone, and direct access keeping
+  Ghost's original cookie paths. The request-origin tests cover the
+  Referer injected when neither Origin nor Referer is present (Home
+  Assistant's no-referrer policy), and existing headers and direct access
+  being untouched.
 - End-to-end in Docker: an add-on container with the real s6 init against a
   fake supervisor — a fresh volume boots with the image-resident
   application, creates `content/data/ghost.db`, and serves `/` and

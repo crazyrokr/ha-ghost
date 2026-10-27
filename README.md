@@ -108,9 +108,11 @@ panel:
   — including `Location` redirects — to the session's ingress path.
   Requests without Home Assistant's ingress header (the exposed port),
   API/JSON responses, uploads, WebSocket upgrades and compressed bodies
-  pass through unchanged. Nothing needs to be configured for this; the
-  `url` option still describes the public origin for the exposed port and
-  for links shared outside the panel.
+  pass through unchanged; Ghost's admin session cookie is scoped to the
+  ingress path as well, so signing in (including email 2FA) works through
+  the panel and the session survives restarts. Nothing needs to be
+  configured for this; the `url` option still describes the public origin
+  for the exposed port and for links shared outside the panel.
 
 ## Options
 

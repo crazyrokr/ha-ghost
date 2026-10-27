@@ -91,7 +91,8 @@ class UpstreamHandler(BaseHTTPRequestHandler):
             response_headers.update(headers)
         self.send_response(status)
         for name, value in response_headers.items():
-            self.send_header(name, value)
+            for item in value if isinstance(value, list) else [value]:
+                self.send_header(name, item)
         self.end_headers()
         if self.command != "HEAD":
             self.wfile.write(raw)
@@ -122,6 +123,38 @@ class UpstreamHandler(BaseHTTPRequestHandler):
                 "text/html; charset=utf-8",
                 {"Location": f"{SITE_ORIGIN}/ghost/"},
             )
+        elif parsed.path == "/login":
+            self.send_body(
+                201,
+                '{"token": "session"}',
+                "application/json; charset=utf-8",
+                {
+                    "Set-Cookie": [
+                        "ghost-admin-api-session=s1; Path=/ghost; HttpOnly; Secure; SameSite=None",
+                        "members-ssr=m1; Path=/; HttpOnly; SameSite=Lax",
+                    ]
+                },
+            )
+        elif parsed.path == "/login-prefixed-cookie":
+            self.send_body(
+                201,
+                '{"token": "session"}',
+                "application/json; charset=utf-8",
+                {
+                    "Set-Cookie": (
+                        "ghost-admin-api-session=s1; Path="
+                        f"{PREFIX}/ghost; HttpOnly; Secure; SameSite=None"
+                    )
+                },
+            )
+        elif parsed.path == "/echo-headers":
+            payload = json.dumps(
+                {
+                    "origin": self.headers.get("Origin"),
+                    "referer": self.headers.get("Referer"),
+                }
+            )
+            self.send_body(200, payload, "application/json; charset=utf-8")
         else:
             self.send_body(404, "not found", "text/plain; charset=utf-8")
 
@@ -187,7 +220,13 @@ def fetch(port, path, headers=None, method="GET", body=None):
     connection.request(method, path, body=body, headers=headers or {})
     response = connection.getresponse()
     payload = response.read()
-    response_headers = {name.lower(): value for name, value in response.getheaders()}
+    response_headers = {}
+    for name, value in response.getheaders():
+        key = name.lower()
+        if key == "set-cookie":
+            response_headers.setdefault("set-cookie", []).append(value)
+        else:
+            response_headers[key] = value
     status = response.status
     connection.close()
     return status, response_headers, payload
@@ -497,6 +536,102 @@ def test_upstream_failure_returns_bad_gateway(tmp_path):
     finally:
         stop_proxy(process)
         assert log_path.exists()
+
+
+# ------------------------------------------------------------- session cookies
+
+def test_session_cookie_path_is_scoped_to_the_ingress_path(addon):
+    # Given Ghost scopes its admin session cookie to Path=/ghost (the
+    # subdirectory-derived path it uses at the origin root)
+    # When the login response passes the proxy under ingress
+    # Then the cookie path carries the ingress prefix, so the browser
+    # returns the cookie on /api/hassio_ingress/<token>/ghost/... requests;
+    # without it the admin session is lost and 2FA verification fails
+    status, headers, _ = fetch(addon.port, "/login", headers=INGRESS_HEADERS)
+    assert status == 201
+    assert (
+        f"ghost-admin-api-session=s1; Path={PREFIX}/ghost; "
+        "HttpOnly; Secure; SameSite=None"
+    ) in headers["set-cookie"], headers["set-cookie"]
+
+
+def test_root_cookie_paths_are_left_alone(addon):
+    # Given a cookie scoped to the site root (e.g. the members session)
+    # When the response passes the proxy under ingress
+    # Then its path is unchanged: "/" already matches every request
+    _, headers, _ = fetch(addon.port, "/login", headers=INGRESS_HEADERS)
+    assert "members-ssr=m1; Path=/; HttpOnly; SameSite=Lax" in headers["set-cookie"]
+
+
+def test_cookie_paths_are_not_rewritten_for_direct_access(addon):
+    # Given the same login response without the ingress header (the
+    # exposed port)
+    # When the proxy passes it through
+    # Then the cookie path is untouched (/ghost is correct at the root)
+    _, headers, _ = fetch(addon.port, "/login")
+    assert (
+        "ghost-admin-api-session=s1; Path=/ghost; HttpOnly; Secure; SameSite=None"
+    ) in headers["set-cookie"], headers["set-cookie"]
+
+
+def test_already_prefixed_cookie_paths_are_not_rewritten_twice(addon):
+    # Given a cookie whose path already carries the ingress prefix
+    # When the response passes the proxy
+    # Then it is left as is (the rewrite is idempotent)
+    _, headers, _ = fetch(
+        addon.port, "/login-prefixed-cookie", headers=INGRESS_HEADERS
+    )
+    assert headers["set-cookie"][0].endswith(
+        f"Path={PREFIX}/ghost; HttpOnly; Secure; SameSite=None"
+    ), headers["set-cookie"]
+
+
+# --------------------------------------------------------------- request origin
+
+def test_missing_referer_is_filled_with_the_session_origin(addon):
+    # Given Home Assistant serves pages with Referrer-Policy: no-referrer,
+    # so the admin page's requests carry no Referer, and same-origin GET
+    # requests carry no Origin either
+    # When such an ingress request reaches the proxy
+    # Then it supplies a Referer with the browser-facing origin, so Ghost's
+    # CSRF check matches the origin stored in the session at login instead
+    # of falling back to the configured site URL
+    _, _, payload = fetch(addon.port, "/echo-headers", headers=INGRESS_HEADERS)
+    echoed = json.loads(payload)
+    assert echoed["referer"] == f"{SESSION_ORIGIN}{PREFIX}/"
+    assert echoed["origin"] is None
+
+
+def test_existing_origin_is_not_overridden(addon):
+    # Given a request that already carries Origin (the login POST)
+    # When the proxy forwards it
+    # Then Ghost sees that Origin unchanged and no Referer is injected
+    _, _, payload = fetch(
+        addon.port, "/echo-headers", headers={**INGRESS_HEADERS, "Origin": SESSION_ORIGIN}
+    )
+    echoed = json.loads(payload)
+    assert echoed["origin"] == SESSION_ORIGIN
+    assert echoed["referer"] is None
+
+
+def test_existing_referer_is_not_overridden(addon):
+    # Given a request that already carries a Referer
+    # When the proxy forwards it
+    # Then the original Referer is kept
+    referer = f"{SESSION_ORIGIN}{PREFIX}/ghost/"
+    _, _, payload = fetch(
+        addon.port, "/echo-headers", headers={**INGRESS_HEADERS, "Referer": referer}
+    )
+    assert json.loads(payload)["referer"] == referer
+
+
+def test_referer_is_not_injected_for_direct_access(addon):
+    # Given a request without the ingress header (the exposed port)
+    # When the proxy forwards it
+    # Then it does not invent a Referer (direct access keeps Ghost's own
+    # behavior: the browser's real headers, or the site-URL fallback)
+    _, _, payload = fetch(addon.port, "/echo-headers")
+    assert json.loads(payload)["referer"] is None
 
 
 # ------------------------------------------------------------- packaging
