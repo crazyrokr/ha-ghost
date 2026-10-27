@@ -8,6 +8,7 @@ template).
 Every test follows Given-When-Then.
 """
 
+import fnmatch
 import json
 import re
 from pathlib import Path
@@ -120,8 +121,19 @@ def test_renovate_manages_dockerfile_pins():
         return matches
 
     def m_files_match_dockerfile(managers):
+        # Renovate treats a bare entry as a glob and only slash-wrapped
+        # entries as regular expressions (its matchRegexOrGlob); a bare
+        # regex is therefore a glob that never selects the file.
+        def matches(pattern):
+            if len(pattern) > 2 and pattern.startswith("/") and pattern.endswith("/"):
+                return re.search(pattern[1:-1], "ghost/Dockerfile") is not None
+            return any(
+                fnmatch.fnmatch(candidate, pattern)
+                for candidate in ("ghost/Dockerfile", "/ghost/Dockerfile")
+            )
+
         return any(
-            re.search(p, "ghost/Dockerfile")
+            matches(p)
             for m in managers
             for p in m.get("managerFilePatterns", [])
         )

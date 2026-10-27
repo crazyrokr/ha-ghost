@@ -8,7 +8,7 @@
     {
       "customType": "regex",
       "description": "Node.js tarball version in the Ghost Dockerfile (declared once, in the shared node stage)",
-      "managerFilePatterns": ["(^|/)ghost/Dockerfile$"],
+      "managerFilePatterns": ["/(^|/)ghost/Dockerfile$/"],
       "matchStrings": ["NODE_VERSION=v(?<currentValue>\\d+\\.\\d+\\.\\d+)"],
       "depNameTemplate": "node",
       "datasourceTemplate": "npm"
@@ -16,7 +16,7 @@
     {
       "customType": "regex",
       "description": "Ghost CLI version (builder stage only) in the Ghost Dockerfile",
-      "managerFilePatterns": ["(^|/)ghost/Dockerfile$"],
+      "managerFilePatterns": ["/(^|/)ghost/Dockerfile$/"],
       "matchStrings": ["ghost-cli@(?<currentValue>\\d+\\.\\d+\\.\\d+)"],
       "depNameTemplate": "ghost-cli",
       "datasourceTemplate": "npm"
@@ -24,7 +24,7 @@
     {
       "customType": "regex",
       "description": "Ghost application version installed at build time in the Ghost Dockerfile",
-      "managerFilePatterns": ["(^|/)ghost/Dockerfile$"],
+      "managerFilePatterns": ["/(^|/)ghost/Dockerfile$/"],
       "matchStrings": ["ghost install (?<currentValue>\\d+\\.\\d+\\.\\d+) local"],
       "depNameTemplate": "ghost",
       "datasourceTemplate": "npm"
