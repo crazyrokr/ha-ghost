@@ -279,9 +279,16 @@ add-on that runs [Ghost](https://ghost.org/) inside Home Assistant with:
   `^22.13.1`, and the build only ships glibc Node 22 tarballs),
   `ghost-cli` (npm, builder stage only), and the
   installed Ghost application version (npm `ghost`, limited to the 5 line
-  until Ghost 6's pnpm 12 requirement is revisited). A Node update PR must
-  also refresh the two per-architecture sha256 hashes (from the nodejs.org
-  dist `SHASUMS256.txt` of the new version).
+  until Ghost 6's pnpm 12 requirement is revisited). A Node update PR
+  changes `NODE_VERSION` only: the node stage downloads that release's
+  `SHASUMS256.txt` from the same dist directory and verifies the
+  architecture-specific tarball against the entry for its exact filename,
+  so no per-architecture hash is hardcoded. The trade-off is explicit: the
+  checksum now travels over the same TLS connection as the tarball, which
+  still catches corrupted or truncated downloads but no longer pins the
+  artifact against a compromised nodejs.org (the previous hardcoded hashes
+  did, at the cost of a manual hash refresh on every Node bump that
+  Renovate could not automate).
 
 ## Consequences
 
