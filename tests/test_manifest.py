@@ -160,6 +160,28 @@ def test_panel_icon_is_material_design_icon(manifest):
         assert icon.startswith("mdi:"), f"panel_icon must be an mdi icon: {icon}"
 
 
+def test_ingress_entry_opens_the_admin_panel(manifest):
+    # Given the add-on is opened from the Home Assistant sidebar
+    # When the ingress entry is checked
+    # Then it is a relative path to Ghost's admin panel (the Supervisor
+    # appends it to the ingress URL; a leading slash would produce a
+    # double slash and miss Ghost's route)
+    entry = manifest.get("ingress_entry")
+    assert entry is not None, "ingress_entry must open the admin panel, not the blog"
+    assert entry.rstrip("/") == "ghost", f"ingress_entry must point at /ghost/: {entry}"
+    assert not entry.startswith("/"), f"ingress_entry must be relative: {entry}"
+    assert ".." not in entry and "://" not in entry, f"unsafe ingress_entry: {entry}"
+
+
+def test_webui_opens_the_admin_panel(manifest):
+    # Given the add-on's direct Web UI link
+    # When it is checked
+    # Then it opens the admin panel rather than the blog front page
+    assert manifest["webui"].endswith("/ghost/"), (
+        f"webui must open the admin panel: {manifest['webui']}"
+    )
+
+
 def test_options_and_schema_keys_agree(manifest):
     # Given the manifest declares options and a schema
     # When their key sets are compared

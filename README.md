@@ -26,7 +26,19 @@ MariaDB/MySQL database can be selected through the add-on options instead.
   to point the blog at an external MariaDB/MySQL database instead.
 - **Two ways in.** The exposed 2368 port for the blog (direct
   `http://<host>:2368`, or through a TLS reverse proxy on a domain) and the
-  add-on's ingress side panel for the admin panel (append `/ghost/`).
+  add-on's ingress side panel, which opens the Ghost admin panel (`/ghost/`)
+  and serves the whole blog under the same ingress path.
+- **Works in the sidebar.** A small ingress URL rewriter ships in the image
+  (no extra dependencies, no extra packages): it prefixes the references
+  Ghost emits for the browser with the session's ingress path, and is only
+  used for ingress traffic — direct port access is untouched. The sidebar
+  panel and the **Open Web UI** button land on the admin panel.
+- **Theme-aware sign-in.** When the admin panel is opened through the Home
+  Assistant side panel, the sign-in, setup and reset screens follow the
+  active HA theme (light or dark), including the spinner while the account
+  loads after signing in, and the sign-in screen shows the add-on logo.
+  Direct-port access is unchanged, and the signed-in admin keeps Ghost's
+  own Night shift toggle.
 - **Safe by design.** The blog runs as a dedicated non-root `ghost` user; the
   container runs under the standard Home Assistant `debian-base` image with
   s6 supervision.
@@ -79,23 +91,34 @@ MariaDB/MySQL database can be selected through the add-on options instead.
 
 ## Access
 
-Ghost serves its theme and core assets relative to the site root and builds
-its links, sitemaps, and in-page API references from the `url` option, so
-the blog must be reachable at an origin root — scheme, host, port — without
-a path prefix:
+The blog is reachable both directly and through the Home Assistant side
+panel:
 
-- **Exposed port (recommended for the blog).** Browse the blog directly at
-  `http://<host>:2368`, or put a TLS reverse proxy (Traefik, nginx, …) on a
-  domain that forwards to the add-on's port, and set `url` to that exact
-  origin. Without `url`, Ghost falls back to `http://localhost:2368/`,
-  whose references resolve to the visitor's own machine. The option is
-  applied on every start, so changing it later needs only a restart; the
-  access protocol must match it (Ghost redirects `http` requests to the
-  `url`'s protocol).
-- **Ingress side panel.** Home Assistant serves the add-on under a path
-  prefix; the admin panel (`/ghost/`) renders there, but the front page's
-  root-relative asset references cannot — this is a Ghost limitation, not
-  an add-on defect. Use the exposed port for the blog itself.
+- **Exposed port.** Browse the blog directly at `http://<host>:2368`, or
+  put a TLS reverse proxy (Traefik, nginx, …) on a domain that forwards to
+  the add-on's port, and set `url` to that exact origin. Without `url`,
+  Ghost falls back to `http://localhost:2368/`, whose references resolve to
+  the visitor's own machine. The option is applied on every start, so
+  changing it later needs only a restart; the access protocol must match it
+  (Ghost redirects `http` requests to the `url`'s protocol).
+- **Ingress side panel — admin panel, with the whole blog reachable.**
+  Open the add-on from the Home Assistant sidebar: it lands on the Ghost
+  admin panel (`/ghost/`, via the manifest's `ingress_entry`). The whole
+  blog is also served under the same ingress path — the front page and
+  posts render there (open the ingress base URL in a tab, e.g. the panel
+  URL without the `ghost/` suffix). Ghost always builds root-relative
+  paths (it cannot be given a path prefix that changes per ingress
+  session), so the add-on runs a small URL rewriter on its ingress port
+  (2369, internal). For requests coming from Home Assistant it prefixes
+  root-relative references and rewrites URLs on the configured site origin
+  — including `Location` redirects — to the session's ingress path.
+  Requests without Home Assistant's ingress header (the exposed port),
+  API/JSON responses, uploads, WebSocket upgrades and compressed bodies
+  pass through unchanged; Ghost's admin session cookie is scoped to the
+  ingress path as well, so signing in (including email 2FA) works through
+  the panel and the session survives restarts. Nothing needs to be
+  configured for this; the `url` option still describes the public origin
+  for the exposed port and for links shared outside the panel.
 
 ## Options
 
