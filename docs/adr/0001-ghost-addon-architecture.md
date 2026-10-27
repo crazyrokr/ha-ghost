@@ -435,9 +435,11 @@ add-on that runs [Ghost](https://ghost.org/) inside Home Assistant with:
   freezes on submit of a `.gh-flow` form: it ignores HA theme changes for
   the whole wait and never re-applies the HA theme against Ghost's choice.
   A change of `html.dark` or `#dark-styles.disabled` away from the values
-  the script last wrote means Ghost took over; the script then deactivates
-  permanently. If the login fails and the task button returns to idle, the
-  freeze lifts and the page re-syncs.
+  the script last wrote means Ghost took over; the script then stops
+  applying the HA theme for the authenticated document and re-arms when
+  the route returns to an explicit unauthenticated route (logout). If the
+  login fails and the task button returns to idle, the freeze lifts and
+  the page re-syncs.
 - **Critical stylesheet.** The script injects one `<style>` element
   (idempotent) holding a complete dark theme for the auth flow — every
   `.gh-flow`, `.gh-flow-content`, `.gh-flow-create`, `.gh-signin`,
