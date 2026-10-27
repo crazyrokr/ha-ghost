@@ -464,11 +464,10 @@ add-on that runs [Ghost](https://ghost.org/) inside Home Assistant with:
   on the HA theme for the whole post-login wait; Ghost's own state change
   does not re-theme it.
 - **Files.** The proxy changes live in
-  `root/usr/local/bin/ghost-ingress-proxy`; the browser script is
-  `root/usr/local/lib/ha-admin-theme/ha-admin-theme.js`, shipped by the
-  existing `COPY root /`; the Dockerfile copies `ghost/logo.png` to
-  `/usr/local/lib/ha-admin-theme/logo.png` for the site icon. No manifest
-  or direct-access change; the dark loader video is the one Ghost ships in
+  `root/usr/local/bin/ghost-ingress-proxy`; the browser script and the
+  add-on logo are `root/usr/local/lib/ha-admin-theme/{ha-admin-theme.js,
+  logo.png}`, shipped by the existing `COPY root /`. No manifest or
+  direct-access change; the dark loader video is the one Ghost ships in
   the image.
 - **Tests.** The proxy behavior tests cover: ingress admin HTML receiving
   the script, the dark loader attribute and the site-icon attribute; the
