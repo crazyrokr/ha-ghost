@@ -21,6 +21,7 @@
 // WebSocket upgrades) passes through unchanged.
 // =============================================================================
 
+const fs = require('fs');
 const http = require('http');
 const zlib = require('zlib');
 const {URL} = require('url');
@@ -36,6 +37,21 @@ const BUFFER_LIMIT_BYTES = 16 * 1024 * 1024;
 // pages, so a spoofed header cannot inject markup or headers.
 const INGRESS_PATH_PATTERN = /^\/api\/hassio_ingress\/[A-Za-z0-9_-]+$/;
 const REWRITABLE_CONTENT_TYPE = /^(text\/html|application\/xhtml\+xml|text\/css)([;\s]|$)/i;
+
+// Admin theme synchronization: the ingress proxy injects Ghost's dark
+// stylesheet link and the theme script into the admin document. The dark
+// stylesheet name is hashed by the build and the script ships in the image;
+// both are read once at startup. When either is missing the injection is
+// disabled and the add-on keeps serving normally.
+const DEFAULT_ADMIN_ASSETS_DIR = '/opt/ghost/current/core/built/admin/assets';
+const DEFAULT_ADMIN_THEME_SCRIPT = '/usr/local/lib/ha-admin-theme/ha-admin-theme.js';
+const ADMIN_DOCUMENT_MARKER = 'ghost-admin/config/environment';
+const ADMIN_SCRIPT_MARKER = 'data-ha-admin-theme';
+const ADMIN_SESSION_COOKIE = /(?:^|;\s*)ghost-admin-api-session=/;
+const ADMIN_PATH = /(?:^|\/)ghost(?:\/|$)/;
+const ADMIN_ASSETS_DIR = process.env.GHOST_ADMIN_ASSETS_DIR || DEFAULT_ADMIN_ASSETS_DIR;
+const ADMIN_THEME_SCRIPT_PATH =
+    process.env.GHOST_ADMIN_THEME_SCRIPT || DEFAULT_ADMIN_THEME_SCRIPT;
 
 // Every data-* attribute is inspected: the rewrite only applies to values
 // that are root-relative or on the configured site origin, so non-URL data
@@ -94,6 +110,83 @@ function parseSiteUrl(raw) {
     } catch (error) {
         return null;
     }
+}
+
+function findDarkStylesheet(directory) {
+    let names;
+    try {
+        names = fs.readdirSync(directory);
+    } catch (error) {
+        console.error(
+            `ghost-ingress-proxy: cannot read the admin assets directory '${directory}': ${error.message}`
+        );
+        return null;
+    }
+    const matches = names.filter((name) => /^ghost-dark-.+\.css$/.test(name));
+    if (matches.length !== 1) {
+        console.error(
+            `ghost-ingress-proxy: expected exactly one ghost-dark-*.css in '${directory}', found ${matches.length}`
+        );
+        return null;
+    }
+    return matches[0];
+}
+
+function readThemeScript(file) {
+    try {
+        return fs.readFileSync(file, 'utf8');
+    } catch (error) {
+        console.error(
+            `ghost-ingress-proxy: cannot read the admin theme script '${file}': ${error.message}`
+        );
+        return null;
+    }
+}
+
+const DARK_STYLESHEET = findDarkStylesheet(ADMIN_ASSETS_DIR);
+const THEME_SCRIPT = DARK_STYLESHEET ? readThemeScript(ADMIN_THEME_SCRIPT_PATH) : null;
+const ADMIN_THEME_ENABLED = Boolean(DARK_STYLESHEET && THEME_SCRIPT);
+
+function requestHasAdminSession(request) {
+    return ADMIN_SESSION_COOKIE.test(String(request.headers.cookie || ''));
+}
+
+function isAdminDocument(request, contentType, body) {
+    if (!ADMIN_THEME_ENABLED) {
+        return false;
+    }
+    if (request.method !== 'GET') {
+        return false;
+    }
+    if (!/^(text\/html|application\/xhtml\+xml)([;\s]|$)/i.test(contentType)) {
+        return false;
+    }
+    if (!ADMIN_PATH.test(String(request.url).split('?')[0])) {
+        return false;
+    }
+    if (!body.includes(ADMIN_DOCUMENT_MARKER)) {
+        return false;
+    }
+    if (body.includes(ADMIN_SCRIPT_MARKER)) {
+        return false;
+    }
+    return body.includes('</head>');
+}
+
+function escapeClosingScript(text) {
+    return text.replace(/<\/script/gi, '<\\/script');
+}
+
+function injectAdminTheme(body, anonymous) {
+    const session = anonymous ? 'absent' : 'present';
+    const markup = [
+        `<link id="dark-styles" rel="alternate stylesheet" title="dark" href="assets/${DARK_STYLESHEET}">`,
+        `<script data-ha-admin-theme data-session="${session}">`,
+        escapeClosingScript(THEME_SCRIPT),
+        '</script>'
+    ].join('\n');
+    const index = body.lastIndexOf('</head>');
+    return index === -1 ? body : body.slice(0, index) + markup + '\n' + body.slice(index);
 }
 
 function firstHeaderValue(value) {
@@ -281,6 +374,9 @@ function responseHeaders(upstreamResponse, options) {
         }
         appendVary(headers, 'X-Ingress-Path');
     }
+    if (options.injected) {
+        appendVary(headers, 'Cookie');
+    }
     if (options.gzip) {
         headers['content-encoding'] = 'gzip';
         appendVary(headers, 'Accept-Encoding');
@@ -339,11 +435,24 @@ function sendRewritten(request, response, upstreamResponse, context, chunks) {
     } catch (error) {
         body = original;
     }
+    let injected = false;
+    const contentType = String(upstreamResponse.headers['content-type'] || '');
+    try {
+        if (isAdminDocument(request, contentType, body)) {
+            body = injectAdminTheme(body, !requestHasAdminSession(request));
+            injected = true;
+        }
+    } catch (error) {
+        console.error(
+            `ghost-ingress-proxy: cannot inject the admin theme: ${error.message}`
+        );
+    }
     const gzip = clientAcceptsGzip(request);
     let payload = Buffer.from(body, 'utf8');
     const headers = responseHeaders(upstreamResponse, {
         rewritten: true,
         context,
+        injected,
         gzip
     });
     if (gzip) {

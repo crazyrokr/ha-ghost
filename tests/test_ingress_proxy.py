@@ -62,6 +62,26 @@ PAGE_HTML = """<!DOCTYPE html>
 </html>
 """
 
+ADMIN_HTML = """<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="ghost-admin/config/environment" content="%7B%7D" />
+<link rel="stylesheet" href="/assets/vendor.css">
+<link rel="stylesheet" href="/assets/ghost-light.css" title="light">
+</head>
+<body>
+<div class="ember-load-indicator"><div class="gh-loading-content"></div></div>
+<script src="/assets/vendor.js"></script>
+<script src="/assets/ghost.js"></script>
+</body>
+</html>
+"""
+
+THEME_SCRIPT = (
+    ADDON_DIR / "root" / "usr" / "local" / "lib" / "ha-admin-theme" / "ha-admin-theme.js"
+)
+
 STYLE_CSS = """@import "/imported.css";
 .x { background: url(/content/images/bg.png); }
 .y { background: url(../relative.png); }
@@ -147,6 +167,18 @@ class UpstreamHandler(BaseHTTPRequestHandler):
                     )
                 },
             )
+        elif parsed.path == "/ghost/":
+            self.send_body(200, ADMIN_HTML, "text/html; charset=utf-8")
+        elif parsed.path == "/ghost/blog":
+            self.send_body(200, PAGE_HTML, "text/html; charset=utf-8")
+        elif parsed.path == "/ghost/themed":
+            self.send_body(
+                200,
+                ADMIN_HTML.replace(
+                    "</head>", '<script data-ha-admin-theme></script></head>'
+                ),
+                "text/html; charset=utf-8",
+            )
         elif parsed.path == "/echo-headers":
             payload = json.dumps(
                 {
@@ -177,22 +209,32 @@ def free_port():
         return probe.getsockname()[1]
 
 
-def start_proxy(node, port, upstream, tmp_path, site=SITE_ORIGIN):
+def start_proxy(node, port, upstream, tmp_path, site=SITE_ORIGIN, extra_env=None):
     log_path = tmp_path / f"proxy-{port}.log"
+    environment = {
+        **os.environ,
+        "GHOST_INGRESS_PROXY_HOST": "127.0.0.1",
+        "GHOST_INGRESS_PROXY_PORT": str(port),
+        "GHOST_INGRESS_PROXY_UPSTREAM": upstream,
+        "GHOST_INGRESS_PROXY_SITE_URL": site,
+    }
+    if extra_env:
+        environment.update(extra_env)
     with log_path.open("wb") as log:
         process = subprocess.Popen(
             [node, str(PROXY)],
-            env={
-                **os.environ,
-                "GHOST_INGRESS_PROXY_HOST": "127.0.0.1",
-                "GHOST_INGRESS_PROXY_PORT": str(port),
-                "GHOST_INGRESS_PROXY_UPSTREAM": upstream,
-                "GHOST_INGRESS_PROXY_SITE_URL": site,
-            },
+            env=environment,
             stdout=log,
             stderr=subprocess.STDOUT,
         )
     return process, log_path
+
+
+def theme_env(tmp_path, assets_dir=None, script_path=None):
+    return {
+        "GHOST_ADMIN_ASSETS_DIR": str(assets_dir or tmp_path / "admin-assets"),
+        "GHOST_ADMIN_THEME_SCRIPT": str(script_path or THEME_SCRIPT),
+    }
 
 
 def wait_for_port(port, timeout=5.0):
@@ -244,8 +286,15 @@ def addon_fixture(tmp_path):
     thread = threading.Thread(target=upstream.serve_forever, daemon=True)
     thread.start()
     port = free_port()
+    assets = tmp_path / "admin-assets"
+    assets.mkdir()
+    (assets / "ghost-dark-test.css").write_text("/* dark */", encoding="utf-8")
     process, log_path = start_proxy(
-        node, port, f"http://127.0.0.1:{upstream.server_address[1]}", tmp_path
+        node,
+        port,
+        f"http://127.0.0.1:{upstream.server_address[1]}",
+        tmp_path,
+        extra_env=theme_env(tmp_path, assets),
     )
     try:
         wait_for_port(port)
@@ -254,6 +303,44 @@ def addon_fixture(tmp_path):
         raise AssertionError(f"proxy failed to start:\n{log_path.read_text()}")
     yield SimpleNamespace(port=port, node=node, tmp_path=tmp_path)
     stop_proxy(process)
+    upstream.shutdown()
+    upstream.server_close()
+    thread.join(timeout=5)
+
+
+@pytest.fixture(name="theming_proxy")
+def theming_proxy_fixture(tmp_path):
+    # Given a fake Ghost upstream and a proxy factory
+    # When a test chooses its own theme configuration
+    # Then the proxy starts with that environment and is torn down afterwards
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node is not available on the test host")
+    upstream = ThreadingHTTPServer(("127.0.0.1", 0), UpstreamHandler)
+    thread = threading.Thread(target=upstream.serve_forever, daemon=True)
+    thread.start()
+    started = []
+
+    def start(extra_env):
+        port = free_port()
+        process, log_path = start_proxy(
+            node,
+            port,
+            f"http://127.0.0.1:{upstream.server_address[1]}",
+            tmp_path,
+            extra_env=extra_env,
+        )
+        try:
+            wait_for_port(port)
+        except AssertionError:
+            stop_proxy(process)
+            raise AssertionError(f"proxy failed to start:\n{log_path.read_text()}")
+        started.append(process)
+        return SimpleNamespace(port=port, log_path=log_path)
+
+    yield start
+    for process in started:
+        stop_proxy(process)
     upstream.shutdown()
     upstream.server_close()
     thread.join(timeout=5)
@@ -632,6 +719,147 @@ def test_referer_is_not_injected_for_direct_access(addon):
     # behavior: the browser's real headers, or the site-URL fallback)
     _, _, payload = fetch(addon.port, "/echo-headers")
     assert json.loads(payload)["referer"] is None
+
+
+# --------------------------------------------------------- admin theme sync
+
+def test_anonymous_ingress_admin_document_is_themed(addon):
+    # Given an anonymous request through ingress for Ghost's admin document
+    # When the proxy responds
+    # Then the dark stylesheet link and the inline theme script are injected
+    # before </head>, marked with the absent session state
+    status, _, payload = fetch(addon.port, "/ghost/", headers=INGRESS_HEADERS)
+    body = payload.decode("utf-8")
+    assert status == 200
+    assert (
+        '<link id="dark-styles" rel="alternate stylesheet" title="dark" '
+        'href="assets/ghost-dark-test.css">'
+    ) in body
+    assert '<script data-ha-admin-theme data-session="absent">' in body
+    assert "ha-admin-theme-style" in body
+    assert body.index("data-ha-admin-theme") < body.index("</head>")
+
+
+def test_an_admin_session_cookie_marks_the_document_present(addon):
+    # Given an ingress request that carries the admin session cookie
+    # When the admin document is served
+    # Then the injected script is marked present, so it stays inert at the
+    # empty-hash panel entry
+    _, _, payload = fetch(
+        addon.port,
+        "/ghost/",
+        headers={**INGRESS_HEADERS, "Cookie": "ghost-admin-api-session=s1"},
+    )
+    body = payload.decode("utf-8")
+    assert '<script data-ha-admin-theme data-session="present">' in body
+    assert '<script data-ha-admin-theme data-session="absent">' not in body
+
+
+def test_themed_admin_responses_drop_the_etag_and_vary_on_the_cookie(addon):
+    # Given a themed admin document
+    # When it passes the proxy through ingress
+    # Then the stale ETag is dropped, the length is recomputed and both the
+    # ingress path and the session cookie are announced as Vary keys
+    status, headers, payload = fetch(addon.port, "/ghost/", headers=INGRESS_HEADERS)
+    assert status == 200
+    assert "etag" not in headers
+    assert "X-Ingress-Path" in headers["vary"]
+    assert "Cookie" in headers["vary"]
+    assert int(headers["content-length"]) == len(payload)
+
+
+def test_direct_admin_access_is_untouched(addon):
+    # Given the same admin document without the ingress header (the exposed
+    # port)
+    # When the proxy passes it through
+    # Then it is byte-identical and no theme is injected
+    status, headers, payload = fetch(addon.port, "/ghost/")
+    assert status == 200
+    assert payload == ADMIN_HTML.encode("utf-8")
+    assert headers["etag"] == '"fake-etag"'
+    assert "vary" not in headers
+
+
+def test_blog_html_is_not_themed(addon):
+    # Given a regular blog page under ingress
+    # When it is served
+    # Then no admin theme markup is injected
+    _, _, payload = fetch(addon.port, "/page", headers=INGRESS_HEADERS)
+    body = payload.decode("utf-8")
+    assert "data-ha-admin-theme" not in body
+    assert "dark-styles" not in body
+
+
+def test_an_admin_path_without_the_document_marker_is_not_themed(addon):
+    # Given a page under the admin path that is not the admin document
+    # When it is served through ingress
+    # Then the missing admin marker prevents the injection
+    _, _, payload = fetch(addon.port, "/ghost/blog", headers=INGRESS_HEADERS)
+    assert "data-ha-admin-theme" not in payload.decode("utf-8")
+
+
+def test_injection_happens_after_url_rewriting(addon):
+    # Given the admin document with root-relative asset references
+    # When it is served through ingress
+    # Then the references are prefixed, while the injected relative href and
+    # the script source are left untouched
+    _, _, payload = fetch(addon.port, "/ghost/", headers=INGRESS_HEADERS)
+    body = payload.decode("utf-8")
+    assert f'href="{PREFIX}/assets/vendor.css"' in body
+    assert 'href="assets/ghost-dark-test.css"' in body
+    assert "ha-admin-theme-style" in body
+
+
+def test_an_invalid_ingress_header_never_injects_into_the_admin_document(addon):
+    # Given a spoofed ingress header that is not a Home Assistant ingress path
+    # When the admin document is served
+    # Then nothing is rewritten or injected
+    status, _, payload = fetch(
+        addon.port,
+        "/ghost/",
+        headers={"X-Ingress-Path": '/evil" onmouseover="alert(1)'},
+    )
+    assert status == 200
+    assert payload == ADMIN_HTML.encode("utf-8")
+
+
+def test_injection_is_idempotent(addon):
+    # Given an admin document that already carries the theme script marker
+    # When it passes the proxy
+    # Then the proxy does not inject a second copy
+    _, _, payload = fetch(addon.port, "/ghost/themed", headers=INGRESS_HEADERS)
+    assert payload.decode("utf-8").count("data-ha-admin-theme") == 1
+
+
+def test_injection_is_disabled_without_a_dark_stylesheet(tmp_path, theming_proxy):
+    # Given an assets directory with no ghost-dark-*.css
+    # When the admin document is served through ingress
+    # Then the page is still served and rewritten, but no theme is injected
+    empty = tmp_path / "empty-assets"
+    empty.mkdir()
+    proxy = theming_proxy(theme_env(tmp_path, empty))
+    status, _, payload = fetch(proxy.port, "/ghost/", headers=INGRESS_HEADERS)
+    body = payload.decode("utf-8")
+    assert status == 200
+    assert "data-ha-admin-theme" not in body
+    assert f'href="{PREFIX}/assets/vendor.css"' in body
+
+
+def test_injection_is_disabled_without_the_theme_script(tmp_path, theming_proxy):
+    # Given the dark stylesheet but a missing theme script
+    # When the admin document is served through ingress
+    # Then the page is still served, but no theme is injected
+    assets = tmp_path / "assets-with-dark"
+    assets.mkdir()
+    (assets / "ghost-dark-test.css").write_text("/* dark */", encoding="utf-8")
+    proxy = theming_proxy(
+        theme_env(tmp_path, assets, tmp_path / "missing-theme.js")
+    )
+    status, _, payload = fetch(proxy.port, "/ghost/", headers=INGRESS_HEADERS)
+    body = payload.decode("utf-8")
+    assert status == 200
+    assert "data-ha-admin-theme" not in body
+    assert f'href="{PREFIX}/assets/vendor.css"' in body
 
 
 # ------------------------------------------------------------- packaging
