@@ -2,7 +2,7 @@ name: Ghost
 version: "0.0.1"
 slug: ghost
 description: Runs Ghost within your Home Assistant setup providing integration of live-features
-image: crazyrokr/ha-ghost
+image: "ghcr.io/crazyrokr/ha-ghost"
 url: https://github.com/crazyrokr/ha-ghost/tree/main/ghost
 webui: http://[HOST]:[PORT:2368]
 panel_icon: "mdi:ghost-outline"
