@@ -1,4 +1,4 @@
-FROM ghcr.io/hassio-addons/debian-base:32770e4 AS app
+FROM ghcr.io/hassio-addons/debian-base:32770e4@sha256:c16befd0489d0f873f66b41c1d028b8978dea70c93b606e9b1cf237c17b7abca AS app
 
 # Node 22 from the official tarball, hash-verified, per architecture.
 # The trixie nodejs package (20.x) is too old: ghost-cli 1.33.7 pulls an
@@ -70,7 +70,7 @@ RUN set -e; \
 # Final image: Node plus the installed Ghost application. No Python, no
 # Ghost CLI, no package-install layers at all.
 # =============================================================================
-FROM ghcr.io/hassio-addons/debian-base:32770e4
+FROM ghcr.io/hassio-addons/debian-base:32770e4@sha256:c16befd0489d0f873f66b41c1d028b8978dea70c93b606e9b1cf237c17b7abca
 
 COPY root /
 
