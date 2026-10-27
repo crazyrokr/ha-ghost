@@ -6,9 +6,9 @@ The Ghost application ships inside the image (GHOST_APP_DIR); the
 persisted volume holds only the user's blog data. Here the scripts are
 executed with the same interpreter the image would use (bashio-based
 scripts under bash, plain scripts under sh), the same environment
-exported, and 'ghost'/'node'/'runuser' replaced by stubs that record
-their invocation (the fake image app is a real directory tree). This
-keeps the tests hermetic (no network, no image build, no root).
+exported, and 'ghost'/'node'/'runuser'/'chown' replaced by stubs that
+record their invocation (the fake image app is a real directory tree).
+This keeps the tests hermetic (no network, no image build, no root).
 """
 
 import json
@@ -156,7 +156,19 @@ def sandbox_fixture(tmp_path):
             """
         )
     )
-    for stub in (ghost_stub, node_stub, runuser_stub):
+    # The container runs as root and hands the config volume to the ghost
+    # user; a CI runner (or a dev host) may run as root without that user
+    # existing, so the ownership handoff is recorded instead of performed.
+    chown_stub = tmp_path / "chown"
+    chown_stub.write_text(
+        textwrap.dedent(
+            """\
+            #!/bin/sh
+            echo "chown $@" >> "$CALL_LOG"
+            """
+        )
+    )
+    for stub in (ghost_stub, node_stub, runuser_stub, chown_stub):
         stub.chmod(stub.stat().st_mode | stat.S_IEXEC)
 
     env = {
@@ -183,8 +195,12 @@ def strip_shebang(script: Path):
 def run_script(script: Path, env: dict, tmp_path: Path, shell: str = "sh"):
     # The bashio-based cont-init script runs under bash in the image
     # (its shebang is /command/with-contenv bashio); the service script
-    # runs under sh.
-    body = BASHIO_STUB + "\n".join(strip_shebang(script)) + "\n"
+    # runs under sh. The bashio stub is only prepended to scripts that
+    # call it: its bash-style function name is a syntax error under dash
+    # (Ubuntu's /bin/sh), even though the service script never uses it.
+    body = "\n".join(strip_shebang(script)) + "\n"
+    if "bashio::" in body:
+        body = BASHIO_STUB + body
     body_file = tmp_path / "script_body.sh"
     body_file.write_text(body, encoding="utf-8")
     result = subprocess.run(
