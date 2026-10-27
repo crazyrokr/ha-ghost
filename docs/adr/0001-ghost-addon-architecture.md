@@ -15,7 +15,9 @@ node binary instead of re-installing the whole distribution. Updated
 2026-10-27: ingress traffic is served by an in-image URL-rewriting proxy
 (see Ingress URL rewriting), so the whole blog works under the Home
 Assistant ingress path prefix, and the sidebar panel opens the admin
-panel.
+panel. Updated 2026-10-27: ingress admin pages synchronize the sign-in,
+setup and reset screens with the active Home Assistant theme (see Admin
+theme synchronization); direct access is unchanged.
 
 ## Context
 
@@ -299,10 +301,11 @@ add-on that runs [Ghost](https://ghost.org/) inside Home Assistant with:
   Core supplies those headers; without them the rewrite falls back to a
   root-relative path). `srcset` candidates are rewritten individually.
   `Location` headers are rewritten the same way, including Ghost's
-  redirects to the forwarded host. The admin panel needs no body rewriting
+  redirects to the forwarded host. The admin panel needs no URL rewriting
   (its assets are document-relative and its API root comes from
   `window.location.pathname`), but its HTML passes through the same
-  rewriter harmlessly.
+  rewriter, where the admin theme synchronization injects its stylesheet
+  and script (see Admin theme synchronization).
 - **What is not rewritten.** JSON/API responses, uploads and other
   non-text types, responses with a `Content-Encoding` (the proxy asks
   upstream for `identity`; if Ghost still compresses, the body is passed
@@ -357,6 +360,126 @@ add-on that runs [Ghost](https://ghost.org/) inside Home Assistant with:
   `http://localhost:2368`. With an empty option, root-relative references
   are still prefixed, so ingress browsing works; the origin only matters
   for absolute references.
+
+### Admin theme synchronization (ingress only)
+
+- **Why the login page is unthemed.** Ghost's admin dark mode ("Night
+  shift") is a per-user flag: after authentication `feature.fetch()` calls
+  `_setAdminTheme()` (`ghost/admin/app/services/feature.js`), which toggles
+  the `dark` class on `<html>` and enables the alternate stylesheet
+  `assets/ghost-dark-<hash>.css`. The sign-in, setup and reset routes have
+  no authenticated user, so that code never runs, and the auth layout
+  (`app/styles/layouts/auth.css`) hardcodes white backgrounds in both the
+  light and the dark bundle. Enabling the dark stylesheet alone is not
+  enough either: the light bundle's resolved text colors (for example the
+  sign-in heading's `#15171a`) stay in effect, so the heading would be dark
+  on a dark background.
+- **Scope.** Only ingress traffic (requests carrying a valid
+  `X-Ingress-Path`) is themed. The exposed port bypasses the proxy
+  entirely, so direct access is unchanged: the admin there keeps Ghost's
+  own Night shift toggle, and the login page stays exactly as Ghost ships
+  it.
+- **Injection.** The ingress proxy, inside its existing HTML rewrite path,
+  injects into the Ghost admin document immediately before `</head>`:
+  - `<link id="dark-styles" rel="alternate stylesheet" title="dark"
+    href="assets/ghost-dark-<hash>.css">` — the same element Ghost's own
+    `lazyLoader.loadStyle` looks for by id, so after login
+    `_setAdminTheme` toggles the injected element instead of adding a
+    second one;
+  - the source of `ha-admin-theme.js`, inlined in a classic
+    `<script data-ha-admin-theme data-session="absent|present">` (a
+    separate asset request would delay first paint; the admin sets no
+    CSP).
+  The admin document is recognised as a GET `text/html` response whose
+  path contains the `/ghost/` segment, whose body carries the
+  `ghost-admin/config/environment` marker, and which is not a HEAD,
+  204/304 or compressed response. The injection runs after `rewriteText`,
+  so the URL and CSS rewriters never see the injected script.
+- **Startup discovery.** The dark stylesheet filename and the script source
+  are read once when the proxy starts: `GHOST_ADMIN_ASSETS_DIR` (default
+  `/opt/ghost/current/core/built/admin/assets`) must hold exactly one
+  `ghost-dark-*.css`, and `GHOST_ADMIN_THEME_SCRIPT` (default
+  `/usr/local/lib/ha-admin-theme/ha-admin-theme.js`) must be readable. If
+  either condition fails, the proxy logs once and disables injection; the
+  add-on keeps serving everything else.
+- **Session state.** The admin session cookie (`ghost-admin-api-session`)
+  is `HttpOnly`, so the page cannot see it; only the proxy can. The
+  injected tag carries `data-session="absent"` when the request has no such
+  cookie and `present` when it does. Because the injected body now varies
+  by cookie, the response drops the upstream ETag (already dropped on the
+  rewrite path), recomputes `Content-Length`, and gains `Vary: Cookie` next
+  to the existing `Vary: X-Ingress-Path`.
+- **Theme detection.** The script reads the HA theme from the same-origin
+  ingress parent (`window.parent.getComputedStyle(documentElement)`):
+  `--clear-background-color`, then `--primary-background-color`, parsed as
+  `#rgb`/`#rrggbb`/`#rrggbbaa`/`rgb()`/`rgba()` and classified by WCAG
+  relative luminance (dark below 0.5), so stock and custom HA themes work.
+  When the parent is self, cross-origin or carries no parseable color, the
+  script falls back to `prefers-color-scheme`.
+- **Activation.** Explicit unauthenticated routes (`#/setup`,
+  `#/setup/done`, `#/signin`, `#/signin/verify`, `#/signup/...`,
+  `#/reset/...`) are always active. The empty hash and `#/` are active only
+  with `data-session="absent"` (the sidebar entry URL is the bare
+  `/ghost/`, and Ember resolves the route only after boot). Every other
+  hash is inactive, so an authenticated document load never applies the HA
+  theme and cannot flash. The script deactivates when the hash commits to
+  an authenticated route and reactivates when the route returns to
+  `#/signin` — an in-SPA logout does not reload the document.
+- **Post-login loading.** After the session POST succeeds Ghost runs
+  `handleAuthenticationTask` (`populateUser` + `postAuthPreparation`:
+  config, features, settings, members) while the sign-in form stays on
+  screen with its button spinner (`GhTaskButton @showSuccess=false` keeps
+  the spinner until the transition). `_setAdminTheme()` runs inside
+  `feature.fetch()` during that window, so the visible form adopts the
+  account's Night shift before the panel appears. The script therefore
+  freezes on submit of a `.gh-flow` form: it ignores HA theme changes for
+  the whole wait and never re-applies the HA theme against Ghost's choice.
+  A change of `html.dark` or `#dark-styles.disabled` away from the values
+  the script last wrote means Ghost took over; the script then deactivates
+  permanently. If the login fails and the task button returns to idle, the
+  freeze lifts and the page re-syncs.
+- **Critical stylesheet.** The script injects one `<style>` element
+  (idempotent) holding a complete dark theme for the auth flow — every
+  `.gh-flow`, `.gh-flow-content`, `.gh-flow-create`, `.gh-signin`,
+  `.gh-signup`, `.gh-setup`, `.gh-auth-email`, `.gh-input*` and
+  `.gh-loading-*` selector, using Ghost's resolved dark palette
+  (`#15171a`, `#1f2328`, `#2a3037`, `#131416`, `#e3e6e8`, `#fafafb`), plus
+  the setup orb filter. It is scoped to `html.dark`, so it is inert on the
+  authenticated admin, and it is present synchronously from script load,
+  so no first paint, logout or night-shift takeover depends on the 588 KB
+  external stylesheet being loaded; `ghost-dark-*.css` only refines it. A
+  minimal set of background/input overrides was rejected: the light
+  stylesheet supplies the light text colors, so a dark background with
+  unloaded dark styles would show, for example, a dark heading on a dark
+  background.
+- **What it cannot avoid.** When the HA theme and the account's Night
+  shift differ (for example HA dark and the default Night shift off), the
+  sign-in/loading screen changes mode while the spinner runs, because
+  Ghost applies the account theme at that point. That is a fully styled
+  mode change, not an unstyled flash; pinning the auth screen to the HA
+  theme until the route commits would only move the change to the panel
+  boundary and would need a second complete light override set. The
+  full-screen boot loader shown when an already-authenticated panel
+  document loads (white until the account theme applies) is out of scope:
+  it renders before the app can know the account's Night shift.
+- **Files.** The proxy changes live in
+  `root/usr/local/bin/ghost-ingress-proxy`; the browser script is
+  `root/usr/local/lib/ha-admin-theme/ha-admin-theme.js`, shipped by the
+  existing `COPY root /`. No manifest, port, Dockerfile or direct-access
+  change.
+- **Tests.** The proxy behavior tests cover: anonymous ingress admin HTML
+  receiving the link, the script and `data-session="absent"`; a cookie
+  producing `present`; blog HTML, JSON, CSS and requests without ingress
+  headers left untouched; the ETag dropped and `Vary: Cookie` added; and
+  injection disabled (the page still served) when the assets or the script
+  are missing. Node tests load the real script into a fake DOM and cover:
+  color parsing and luminance; HA parent versus `prefers-color-scheme`
+  fallback; the activation matrix (session state x hash); submit freeze
+  and Ghost takeover in both modes; failed-login re-arm; deactivation on
+  route commit; logout reactivation; the critical style inserted once; and
+  observer/media re-sync. Visual verification covers the side panel in
+  dark and light HA themes, login to panel with no unstyled gap, logout to
+  a themed sign-in, and the setup screen.
 
 ### CI/CD and metadata hygiene
 
