@@ -63,17 +63,20 @@ PAGE_HTML = """<!DOCTYPE html>
 """
 
 ADMIN_HTML = """<!DOCTYPE html>
-<html class="no-js" lang="en">
+<html lang="en">
 <head>
 <meta charset="UTF-8" />
-<meta name="ghost-admin/config/environment" content="%7B%7D" />
-<link rel="stylesheet" href="/assets/vendor.css">
-<link rel="stylesheet" href="/assets/ghost-light.css" title="light">
+<title>Ghost</title>
+<link rel="stylesheet" href="/assets/admin.css">
+<script type="module" crossorigin src="./assets/index-test.js"></script>
 </head>
-<body>
-<div class="ember-load-indicator"><div class="gh-loading-content"></div></div>
-<script src="/assets/vendor.js"></script>
-<script src="/assets/ghost.js"></script>
+<body class="react-admin">
+<div id="root"></div>
+<div id="boot-splash">
+<video width="100" height="100" loop autoplay muted playsinline preload="metadata">
+<source src="./assets/logo-loader-light-test.mp4" type="video/mp4" />
+</video>
+</div>
 </body>
 </html>
 """
@@ -289,8 +292,8 @@ def addon_fixture(tmp_path):
     thread.start()
     port = free_port()
     assets = tmp_path / "admin-assets"
-    (assets / "videos").mkdir(parents=True)
-    (assets / "videos" / "logo-loader-dark-test.mp4").write_bytes(b"")
+    assets.mkdir()
+    (assets / "logo-loader-dark-test.mp4").write_bytes(b"")
     (tmp_path / "theme-logo.png").write_bytes(THEME_LOGO_BYTES)
     process, log_path = start_proxy(
         node,
@@ -678,41 +681,84 @@ def test_already_prefixed_cookie_paths_are_not_rewritten_twice(addon):
 
 # --------------------------------------------------------------- request origin
 
-def test_missing_referer_is_filled_with_the_session_origin(addon):
+def test_missing_referer_is_filled_with_the_site_origin(addon):
     # Given Home Assistant serves pages with Referrer-Policy: no-referrer,
     # so the admin page's requests carry no Referer, and same-origin GET
     # requests carry no Origin either
     # When such an ingress request reaches the proxy
-    # Then it supplies a Referer with the browser-facing origin, so Ghost's
-    # CSRF check matches the origin stored in the session at login instead
-    # of falling back to the configured site URL
+    # Then it supplies a Referer on the configured site origin, so Ghost's
+    # origin check matches the admin URL (and the origin the session stored
+    # at login) instead of the Home Assistant origin
     _, _, payload = fetch(addon.port, "/echo-headers", headers=INGRESS_HEADERS)
     echoed = json.loads(payload)
-    assert echoed["referer"] == f"{SESSION_ORIGIN}{PREFIX}/"
+    assert echoed["referer"] == f"{SITE_ORIGIN}/"
     assert echoed["origin"] is None
 
 
-def test_existing_origin_is_not_overridden(addon):
-    # Given a request that already carries Origin (the login POST)
-    # When the proxy forwards it
-    # Then Ghost sees that Origin unchanged and no Referer is injected
+def test_ingress_origin_is_presented_as_the_site_origin(addon):
+    # Given the login POST carries the Home Assistant origin (the browser's
+    # Origin is the page origin, not the configured site origin)
+    # When the proxy forwards it through ingress
+    # Then Ghost sees the configured site origin: Ghost 6 validates the
+    # admin request origin against the admin URL (login CSRF) and stores the
+    # session origin from this header
     _, _, payload = fetch(
         addon.port, "/echo-headers", headers={**INGRESS_HEADERS, "Origin": SESSION_ORIGIN}
     )
     echoed = json.loads(payload)
-    assert echoed["origin"] == SESSION_ORIGIN
-    assert echoed["referer"] is None
+    assert echoed["origin"] == SITE_ORIGIN
+    assert echoed["referer"] == f"{SITE_ORIGIN}/"
 
 
-def test_existing_referer_is_not_overridden(addon):
-    # Given a request that already carries a Referer
-    # When the proxy forwards it
-    # Then the original Referer is kept
+def test_ingress_referer_is_rewritten_to_the_site_origin(addon):
+    # Given a request that already carries the Home Assistant page as its
+    # Referer
+    # When the proxy forwards it through ingress
+    # Then Ghost sees a Referer on the configured site origin, matching the
+    # stored session origin
     referer = f"{SESSION_ORIGIN}{PREFIX}/ghost/"
     _, _, payload = fetch(
         addon.port, "/echo-headers", headers={**INGRESS_HEADERS, "Referer": referer}
     )
-    assert json.loads(payload)["referer"] == referer
+    assert json.loads(payload)["referer"] == f"{SITE_ORIGIN}/"
+
+
+def test_direct_access_keeps_the_origin_headers(addon):
+    # Given a request on the exposed port (no ingress header)
+    # When it carries an Origin and a Referer
+    # Then the proxy does not rewrite them
+    payload = fetch(
+        addon.port,
+        "/echo-headers",
+        headers={"Origin": SESSION_ORIGIN, "Referer": f"{SESSION_ORIGIN}/ghost/"},
+    )[2]
+    echoed = json.loads(payload)
+    assert echoed["origin"] == SESSION_ORIGIN
+    assert echoed["referer"] == f"{SESSION_ORIGIN}/ghost/"
+
+
+def test_without_the_url_option_the_default_site_origin_is_presented(
+    tmp_path, theming_proxy
+):
+    # Given no configured site URL (the add-on 'url' option is empty), so
+    # Ghost's site URL is its built-in default
+    # When an ingress request carries the Home Assistant Origin
+    # Then the proxy presents that default origin, which is what Ghost
+    # derives as the admin URL in the same situation
+    proxy = theming_proxy(
+        {
+            "GHOST_INGRESS_PROXY_SITE_URL": "",
+            "GHOST_ADMIN_ASSETS_DIR": str(tmp_path / "admin-assets"),
+            "GHOST_ADMIN_THEME_SCRIPT": str(THEME_SCRIPT),
+            "GHOST_ADMIN_THEME_LOGO": str(tmp_path / "theme-logo.png"),
+        }
+    )
+    payload = fetch(
+        proxy.port,
+        "/echo-headers",
+        headers={**INGRESS_HEADERS, "Origin": SESSION_ORIGIN},
+    )[2]
+    assert json.loads(payload)["origin"] == "http://localhost:2368"
 
 
 def test_referer_is_not_injected_for_direct_access(addon):
@@ -736,7 +782,7 @@ def test_anonymous_ingress_admin_document_is_themed(addon):
     assert status == 200
     assert (
         '<script data-ha-admin-theme '
-        'data-dark-loader="assets/videos/logo-loader-dark-test.mp4" '
+        'data-dark-loader="assets/logo-loader-dark-test.mp4" '
         'data-site-icon="assets/ha-admin-theme-logo.png">'
     ) in body
     assert "ha-admin-theme-style" in body
@@ -774,8 +820,8 @@ def test_the_site_icon_attribute_is_omitted_without_the_logo(tmp_path, theming_p
     # When the admin document is served through ingress
     # Then the script is still injected, but without the site-icon attribute
     assets = tmp_path / "assets-with-video"
-    (assets / "videos").mkdir(parents=True)
-    (assets / "videos" / "logo-loader-dark-test.mp4").write_bytes(b"")
+    assets.mkdir()
+    (assets / "logo-loader-dark-test.mp4").write_bytes(b"")
     proxy = theming_proxy(
         theme_env(tmp_path, assets, logo_path=tmp_path / "missing-logo.png")
     )
@@ -783,7 +829,7 @@ def test_the_site_icon_attribute_is_omitted_without_the_logo(tmp_path, theming_p
     body = payload.decode("utf-8")
     assert status == 200
     assert 'data-site-icon="' not in body
-    assert 'data-dark-loader="assets/videos/logo-loader-dark-test.mp4"' in body
+    assert 'data-dark-loader="assets/logo-loader-dark-test.mp4"' in body
     assert "ha-admin-theme-style" in body
 
 
@@ -852,7 +898,7 @@ def test_injection_happens_after_url_rewriting(addon):
     # left untouched
     _, _, payload = fetch(addon.port, "/ghost/", headers=INGRESS_HEADERS)
     body = payload.decode("utf-8")
-    assert f'href="{PREFIX}/assets/vendor.css"' in body
+    assert f'href="{PREFIX}/assets/admin.css"' in body
     assert "ha-admin-theme-style" in body
     assert "dark-styles" not in body
 
@@ -883,8 +929,8 @@ def test_injection_is_disabled_without_the_theme_script(tmp_path, theming_proxy)
     # When the admin document is served through ingress
     # Then the page is still served, but no theme is injected
     assets = tmp_path / "assets-with-video"
-    (assets / "videos").mkdir(parents=True)
-    (assets / "videos" / "logo-loader-dark-test.mp4").write_bytes(b"")
+    assets.mkdir()
+    (assets / "logo-loader-dark-test.mp4").write_bytes(b"")
     proxy = theming_proxy(
         theme_env(tmp_path, assets, tmp_path / "missing-theme.js")
     )
@@ -892,7 +938,7 @@ def test_injection_is_disabled_without_the_theme_script(tmp_path, theming_proxy)
     body = payload.decode("utf-8")
     assert status == 200
     assert "data-ha-admin-theme" not in body
-    assert f'href="{PREFIX}/assets/vendor.css"' in body
+    assert f'href="{PREFIX}/assets/admin.css"' in body
 
 
 def test_the_dark_loader_attribute_is_omitted_without_the_video(tmp_path, theming_proxy):
@@ -910,7 +956,7 @@ def test_the_dark_loader_attribute_is_omitted_without_the_video(tmp_path, themin
     assert 'data-dark-loader="' not in body
     assert 'data-site-icon="assets/ha-admin-theme-logo.png"' in body
     assert "ha-admin-theme-style" in body
-    assert f'href="{PREFIX}/assets/vendor.css"' in body
+    assert f'href="{PREFIX}/assets/admin.css"' in body
 
 
 # ------------------------------------------------------------- packaging

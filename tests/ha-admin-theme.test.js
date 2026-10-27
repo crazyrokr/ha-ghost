@@ -4,10 +4,16 @@
  *
  * Loads the real browser script into a minimal fake window/document: a
  * parent HA window with readable CSS custom properties, a matchMedia with
- * a change listener, the admin boot loader (with its video source), and a
- * MutationObserver registry that the tests flush explicitly. Run with:
+ * a change listener, the Ghost 6 admin boot splash (with its video source),
+ * and a MutationObserver registry that the tests flush explicitly.
  *
- *   node --test tests/ha-admin-theme.test.js
+ * Ghost 6's React admin owns a `dark` class on <html> and ships a complete
+ * dark theme behind it. The script therefore applies that class (plus a
+ * private marker used for the add-on logo) on the unauthenticated screens,
+ * hands the theme back to the app on authenticated routes, and swaps the
+ * boot splash video.
+ *
+ * Run with: node --test tests/ha-admin-theme.test.js
  */
 
 const fs = require("node:fs");
@@ -27,12 +33,36 @@ const SCRIPT_PATH = path.join(
   "ha-admin-theme.js"
 );
 
+function createClassList(classes) {
+  return {
+    add(name) {
+      classes.add(name);
+    },
+    remove(name) {
+      classes.delete(name);
+    },
+    toggle(name, force) {
+      const enabled = force === undefined ? !classes.has(name) : Boolean(force);
+      if (enabled) {
+        classes.add(name);
+      } else {
+        classes.delete(name);
+      }
+    },
+    contains(name) {
+      return classes.has(name);
+    }
+  };
+}
+
 function createBrowser(options = {}) {
   const observers = [];
   const windowListeners = {};
   const documentListeners = {};
   const styles = [];
-  const classes = new Set();
+  const rootClasses = new Set();
+  const bodyClasses = new Set();
+  const reactClasses = new Set();
 
   let hash = options.hash || "";
   let localDark = Boolean(options.localDark);
@@ -40,12 +70,11 @@ function createBrowser(options = {}) {
   let mediaListener = null;
   let loaderPresent =
     options.loaderPresent === undefined ? true : Boolean(options.loaderPresent);
-  let ghostLinkDisabled =
-    options.ghostLinkDisabled === undefined ? true : Boolean(options.ghostLinkDisabled);
   let styleElement = null;
   let loaderLoads = 0;
 
-  const originalLoaderSource = options.loaderSource || "assets/videos/logo-loader-light.mp4";
+  const originalLoaderSource =
+    options.loaderSource || "assets/logo-loader-light-test.mp4";
   const loaderSource = {
     src: originalLoaderSource,
     getAttribute(name) {
@@ -70,6 +99,7 @@ function createBrowser(options = {}) {
     constructor(callback) {
       this.callback = callback;
       this.active = false;
+      this.kind = "window";
       observers.push(this);
     }
 
@@ -82,9 +112,16 @@ function createBrowser(options = {}) {
     }
   }
 
-  function flushObservers() {
+  class FakeParentMutationObserver extends FakeMutationObserver {
+    constructor(callback) {
+      super(callback);
+      this.kind = "parent";
+    }
+  }
+
+  function flushObservers(kind) {
     for (const observer of observers.slice()) {
-      if (observer.active) {
+      if (observer.active && (kind === undefined || observer.kind === kind)) {
         observer.callback([], observer);
       }
     }
@@ -96,35 +133,9 @@ function createBrowser(options = {}) {
     }
   }
 
-  const documentElement = {
-    classList: {
-      toggle(name, force) {
-        const enabled = force === undefined ? !classes.has(name) : Boolean(force);
-        if (enabled) {
-          classes.add(name);
-        } else {
-          classes.delete(name);
-        }
-      },
-      contains(name) {
-        return classes.has(name);
-      }
-    }
-  };
-
   if (options.ghostDark) {
-    classes.add("dark");
+    rootClasses.add("dark");
   }
-
-  const darkLink = {
-    id: "dark-styles",
-    get disabled() {
-      return ghostLinkDisabled;
-    },
-    set disabled(value) {
-      ghostLinkDisabled = Boolean(value);
-    }
-  };
 
   const scriptTag = {dataset: {}};
   if (options.darkLoader !== undefined) {
@@ -134,9 +145,11 @@ function createBrowser(options = {}) {
     scriptTag.dataset.siteIcon = options.siteIcon;
   }
 
+  const reactRoot = {classList: createClassList(reactClasses)};
+
   const fakeDocument = {
-    documentElement,
-    body: {},
+    documentElement: {classList: createClassList(rootClasses)},
+    body: {classList: createClassList(bodyClasses)},
     head: {
       appendChild(element) {
         if (element.tagName === "style") {
@@ -149,13 +162,13 @@ function createBrowser(options = {}) {
     currentScript: scriptTag,
     querySelector(selector) {
       if (selector === "script[data-ha-admin-theme]") return scriptTag;
-      if (selector === ".ember-load-indicator") return loaderPresent ? {} : null;
-      if (selector === ".ember-load-indicator video") return loaderPresent ? loaderVideo : null;
+      if (selector === "#boot-splash") return loaderPresent ? {} : null;
+      if (selector === "#boot-splash video") return loaderPresent ? loaderVideo : null;
       return null;
     },
     getElementById(id) {
-      if (id === "dark-styles") return darkLink;
       if (id === "ha-admin-theme-style") return styleElement;
+      if (id === "root") return reactRoot;
       return null;
     },
     createElement(tagName) {
@@ -176,7 +189,7 @@ function createBrowser(options = {}) {
         getComputedStyle() {
           throw new Error("SecurityError: cross-origin access denied");
         },
-        MutationObserver: FakeMutationObserver
+        MutationObserver: FakeParentMutationObserver
       }
     : {
         document: parentDocument,
@@ -187,7 +200,7 @@ function createBrowser(options = {}) {
             }
           };
         },
-        MutationObserver: FakeMutationObserver
+        MutationObserver: FakeParentMutationObserver
       };
 
   const media = {
@@ -236,6 +249,11 @@ function createBrowser(options = {}) {
       hash = nextHash;
       dispatch("hashchange", windowListeners, {});
     },
+    setHashSilently(nextHash) {
+      // React Router updates the hash through history.replaceState, which
+      // fires no hashchange event.
+      hash = nextHash;
+    },
     setParentVars(vars) {
       parentVars = {...vars};
     },
@@ -246,33 +264,36 @@ function createBrowser(options = {}) {
       }
     },
     flushObservers,
+    flushAppObservers() {
+      flushObservers("window");
+    },
     showLoader() {
       loaderPresent = true;
       flushObservers();
     },
     bootApp() {
-      // The application inserted its view and removed the boot loader.
-      loaderPresent = false;
+      // Ghost's React shell adds this class once the app has mounted; the
+      // boot splash element stays in the document (CSS hides it).
+      bodyClasses.add("react-admin-mounted");
       fakeDocument.readyState = "interactive";
       dispatch("DOMContentLoaded", documentListeners, {});
       flushObservers();
     },
+    setGhostTheme(dark) {
+      if (dark) {
+        rootClasses.add("dark");
+      } else {
+        rootClasses.delete("dark");
+      }
+    },
     authDarkClass() {
-      return classes.has("ha-auth-dark");
+      return rootClasses.has("ha-auth-dark");
+    },
+    reactDarkClass() {
+      return reactClasses.has("dark");
     },
     ghostDarkClass() {
-      return classes.has("dark");
-    },
-    setGhostTheme(dark, disabled) {
-      if (dark) {
-        classes.add("dark");
-      } else {
-        classes.delete("dark");
-      }
-      ghostLinkDisabled = Boolean(disabled);
-    },
-    ghostLinkDisabled() {
-      return ghostLinkDisabled;
+      return rootClasses.has("dark");
     },
     videoSrc() {
       return loaderSource.getAttribute("src");
@@ -294,7 +315,8 @@ function createBrowser(options = {}) {
 
 const DARK_PARENT = {"--clear-background-color": "#0b0c10"};
 const LIGHT_PARENT = {"--clear-background-color": "#ffffff"};
-const DARK_LOADER = "assets/videos/logo-loader-dark-test.mp4";
+const DARK_LOADER = "assets/logo-loader-dark-test.mp4";
+const SITE_ICON = "assets/ha-admin-theme-logo.png";
 
 test("dark HA parent themes the sign-in screen", () => {
   // Given an ingress sign-in page whose parent HA theme is dark
@@ -304,10 +326,9 @@ test("dark HA parent themes the sign-in screen", () => {
   browser.load();
   browser.bootApp();
 
-  // Then our theme class is on, and Ghost's own dark state is untouched
+  // Then Ghost's dark theme and our auth marker are applied
+  assert.equal(browser.ghostDarkClass(), true);
   assert.equal(browser.authDarkClass(), true);
-  assert.equal(browser.ghostDarkClass(), false);
-  assert.equal(browser.ghostLinkDisabled(), true);
 });
 
 test("light HA parent leaves the sign-in screen light", () => {
@@ -318,12 +339,31 @@ test("light HA parent leaves the sign-in screen light", () => {
   browser.load();
   browser.bootApp();
 
-  // Then our theme class is absent
+  // Then neither theme class is applied
+  assert.equal(browser.ghostDarkClass(), false);
   assert.equal(browser.authDarkClass(), false);
 });
 
-test("authenticated panel load themes only the loading screen", () => {
-  // Given an authenticated side-panel load on a panel route, HA dark
+test("a stale Ghost dark state is cleared on the sign-in screen", () => {
+  // Given Ghost still carries its dark class from an earlier session while
+  // the Home Assistant theme is light
+  const browser = createBrowser({
+    hash: "#/signin",
+    parentVars: LIGHT_PARENT,
+    ghostDark: true
+  });
+
+  // When the sign-in screen is themed
+  browser.load();
+  browser.bootApp();
+
+  // Then the sign-in follows Home Assistant, not the stale Ghost state
+  assert.equal(browser.ghostDarkClass(), false);
+  assert.equal(browser.authDarkClass(), false);
+});
+
+test("an authenticated panel load hands the theme back to Ghost", () => {
+  // Given a side-panel load on an authenticated route with HA dark
   const browser = createBrowser({
     hash: "#/dashboard",
     parentVars: DARK_PARENT,
@@ -333,29 +373,52 @@ test("authenticated panel load themes only the loading screen", () => {
   // When the document starts loading
   browser.load();
 
-  // Then the boot loader is themed before the app takes over
+  // Then the boot loader is themed
+  assert.equal(browser.ghostDarkClass(), true);
   assert.equal(browser.authDarkClass(), true);
 
-  // And after the app boots the class is removed, leaving the panel alone
+  // And once the app has mounted, our marker is gone while Ghost's own
+  // theme state is left for the app to reconcile
   browser.bootApp();
   assert.equal(browser.authDarkClass(), false);
+  assert.equal(browser.ghostDarkClass(), true);
+
+  // When Ghost applies a light account preference it removes the class
+  browser.setGhostTheme(false);
+  browser.flushAppObservers();
   assert.equal(browser.ghostDarkClass(), false);
-  assert.equal(browser.ghostLinkDisabled(), true);
+  assert.equal(browser.authDarkClass(), false);
 });
 
-test("empty-hash panel entry themes only the loading screen", () => {
-  // Given the side-panel entry URL (bare /ghost/) with a session, HA dark
+test("empty-hash panel entry hands the theme back at boot", () => {
+  // Given the side-panel entry URL (bare /ghost/) with HA dark
   const browser = createBrowser({hash: "", parentVars: DARK_PARENT});
 
   // When the document starts loading
   browser.load();
+  assert.equal(browser.ghostDarkClass(), true);
 
-  // Then the boot loader is themed
-  assert.equal(browser.authDarkClass(), true);
-
-  // And the class is removed at boot, so it cannot leak into the panel
+  // Then the marker is removed at boot and Ghost's state is left alone
   browser.bootApp();
   assert.equal(browser.authDarkClass(), false);
+  assert.equal(browser.ghostDarkClass(), true);
+});
+
+test("a programmatic route change re-syncs without a hashchange event", () => {
+  // Given a booted admin on the empty-hash entry that Ghost redirects to
+  // the setup screen with history.replaceState (which fires no event)
+  const browser = createBrowser({hash: "", parentVars: DARK_PARENT});
+  browser.load();
+  browser.bootApp();
+  assert.equal(browser.authDarkClass(), false);
+
+  // When the app lands on the setup route
+  browser.setHashSilently("#/setup");
+  browser.flushAppObservers();
+
+  // Then the setup screen follows the HA theme
+  assert.equal(browser.ghostDarkClass(), true);
+  assert.equal(browser.authDarkClass(), true);
 });
 
 test("the HA theme is read from the parent with an OS fallback", () => {
@@ -366,7 +429,7 @@ test("the HA theme is read from the parent with an OS fallback", () => {
   });
   primary.load();
   primary.bootApp();
-  assert.equal(primary.authDarkClass(), true);
+  assert.equal(primary.ghostDarkClass(), true);
 
   // And a standalone tab on a dark OS scheme
   const standalone = createBrowser({
@@ -376,7 +439,7 @@ test("the HA theme is read from the parent with an OS fallback", () => {
   });
   standalone.load();
   standalone.bootApp();
-  assert.equal(standalone.authDarkClass(), true);
+  assert.equal(standalone.ghostDarkClass(), true);
 
   // And a cross-origin parent on a light OS scheme
   const crossOrigin = createBrowser({
@@ -386,7 +449,7 @@ test("the HA theme is read from the parent with an OS fallback", () => {
   });
   crossOrigin.load();
   crossOrigin.bootApp();
-  assert.equal(crossOrigin.authDarkClass(), false);
+  assert.equal(crossOrigin.ghostDarkClass(), false);
 });
 
 test("parent color formats are parsed", () => {
@@ -412,7 +475,7 @@ test("parent color formats are parsed", () => {
     browser.bootApp();
 
     // Then the color decides the theme
-    assert.equal(browser.authDarkClass(), expected, color);
+    assert.equal(browser.ghostDarkClass(), expected, color);
   }
 });
 
@@ -425,7 +488,7 @@ test("invalid parent colors fall back without throwing", () => {
   });
   invalid.load();
   invalid.bootApp();
-  assert.equal(invalid.authDarkClass(), true);
+  assert.equal(invalid.ghostDarkClass(), true);
 
   // And an out-of-range channel is rejected the same way
   const outOfRange = createBrowser({
@@ -435,7 +498,7 @@ test("invalid parent colors fall back without throwing", () => {
   });
   outOfRange.load();
   outOfRange.bootApp();
-  assert.equal(outOfRange.authDarkClass(), false);
+  assert.equal(outOfRange.ghostDarkClass(), false);
 
   // And the next candidate is used when the first is unparseable
   const fallback = createBrowser({
@@ -447,7 +510,7 @@ test("invalid parent colors fall back without throwing", () => {
   });
   fallback.load();
   fallback.bootApp();
-  assert.equal(fallback.authDarkClass(), true);
+  assert.equal(fallback.ghostDarkClass(), true);
 });
 
 test("luminance threshold classifies mid greys", () => {
@@ -458,7 +521,7 @@ test("luminance threshold classifies mid greys", () => {
   });
   darkGrey.load();
   darkGrey.bootApp();
-  assert.equal(darkGrey.authDarkClass(), true);
+  assert.equal(darkGrey.ghostDarkClass(), true);
 
   const lightGrey = createBrowser({
     hash: "#/signin",
@@ -466,62 +529,55 @@ test("luminance threshold classifies mid greys", () => {
   });
   lightGrey.load();
   lightGrey.bootApp();
-  assert.equal(lightGrey.authDarkClass(), false);
+  assert.equal(lightGrey.ghostDarkClass(), false);
 });
 
-test("the post-login spinner keeps the HA theme", () => {
+test("logout re-applies the HA theme", () => {
+  // Given an authenticated panel on a light Home Assistant theme
+  const browser = createBrowser({
+    hash: "#/dashboard",
+    parentVars: LIGHT_PARENT,
+    ghostDark: false
+  });
+  browser.load();
+  browser.bootApp();
+  assert.equal(browser.ghostDarkClass(), false);
+
+  // When the parent theme turns dark and the user logs out
+  browser.setParentVars(DARK_PARENT);
+  browser.setHash("#/signin");
+
+  // Then the sign-in screen follows the parent theme
+  assert.equal(browser.ghostDarkClass(), true);
+  assert.equal(browser.authDarkClass(), true);
+
+  // And a light parent flips it back
+  browser.setParentVars(LIGHT_PARENT);
+  browser.flushObservers();
+  assert.equal(browser.ghostDarkClass(), false);
+  assert.equal(browser.authDarkClass(), false);
+});
+
+test("the app's own theme wins once it applies on the sign-in screen", () => {
   // Given a dark HA sign-in page with the app booted
   const browser = createBrowser({hash: "#/signin", parentVars: DARK_PARENT});
   browser.load();
   browser.bootApp();
-  assert.equal(browser.authDarkClass(), true);
+  assert.equal(browser.ghostDarkClass(), true);
 
-  // When Ghost applies a light account Night shift during the wait
-  browser.setGhostTheme(false, true);
-  browser.flushObservers();
+  // When Ghost applies a light account preference during the wait
+  browser.setGhostTheme(false);
+  browser.flushAppObservers();
 
-  // Then our class stays on, so the spinner screen keeps the HA theme
-  assert.equal(browser.authDarkClass(), true);
+  // Then the script detects that the application has an opinion and stops
+  // forcing its own theme, so it cannot fight the app
   assert.equal(browser.ghostDarkClass(), false);
-  assert.equal(browser.ghostLinkDisabled(), true);
-
-  // And when Ghost applies a dark account Night shift it still keeps it
-  browser.setGhostTheme(true, false);
-  browser.flushObservers();
   assert.equal(browser.authDarkClass(), true);
-  assert.equal(browser.ghostDarkClass(), true);
 
-  // When the panel route commits our class is removed, leaving Ghost's state
+  // And the authenticated route leaves Ghost's state in place
   browser.setHash("#/dashboard");
   assert.equal(browser.authDarkClass(), false);
-  assert.equal(browser.ghostDarkClass(), true);
-  assert.equal(browser.ghostLinkDisabled(), false);
-
-  // And logout re-applies the HA theme
-  browser.setHash("#/signin");
-  assert.equal(browser.authDarkClass(), true);
-});
-
-test("a light HA theme stays light while Ghost's panel turns dark", () => {
-  // Given a light HA sign-in page with the app booted
-  const browser = createBrowser({hash: "#/signin", parentVars: LIGHT_PARENT});
-  browser.load();
-  browser.bootApp();
-  assert.equal(browser.authDarkClass(), false);
-
-  // When Ghost applies a dark account Night shift during the wait
-  browser.setGhostTheme(true, false);
-  browser.flushObservers();
-
-  // Then the sign-in/loading screen stays light (it follows HA), and Ghost's
-  // own state is untouched for the panel
-  assert.equal(browser.authDarkClass(), false);
-  assert.equal(browser.ghostDarkClass(), true);
-  assert.equal(browser.ghostLinkDisabled(), false);
-
-  browser.setHash("#/dashboard");
-  assert.equal(browser.authDarkClass(), false);
-  assert.equal(browser.ghostDarkClass(), true);
+  assert.equal(browser.ghostDarkClass(), false);
 });
 
 test("parent theme mutation re-syncs the auth screen", () => {
@@ -529,13 +585,14 @@ test("parent theme mutation re-syncs the auth screen", () => {
   const browser = createBrowser({hash: "#/signin", parentVars: LIGHT_PARENT});
   browser.load();
   browser.bootApp();
-  assert.equal(browser.authDarkClass(), false);
+  assert.equal(browser.ghostDarkClass(), false);
 
   // When the parent HA theme turns dark
   browser.setParentVars(DARK_PARENT);
   browser.flushObservers();
 
   // Then the page follows it
+  assert.equal(browser.ghostDarkClass(), true);
   assert.equal(browser.authDarkClass(), true);
 });
 
@@ -548,13 +605,13 @@ test("media change re-syncs the auth screen", () => {
   });
   browser.load();
   browser.bootApp();
-  assert.equal(browser.authDarkClass(), false);
+  assert.equal(browser.ghostDarkClass(), false);
 
   // When the OS scheme flips to dark
   browser.setLocalDark(true);
 
   // Then the page follows it
-  assert.equal(browser.authDarkClass(), true);
+  assert.equal(browser.ghostDarkClass(), true);
 });
 
 test("the dark loader video replaces the light one", () => {
@@ -587,7 +644,7 @@ test("a light theme keeps the original loader video", () => {
   browser.load();
 
   // Then the original source is untouched and visible
-  assert.equal(browser.videoSrc(), "assets/videos/logo-loader-light.mp4");
+  assert.equal(browser.videoSrc(), "assets/logo-loader-light-test.mp4");
   assert.equal(browser.videoLoads(), 0);
   assert.equal(browser.videoVisibility(), "");
 });
@@ -599,20 +656,45 @@ test("a dark theme without a dark loader hides the white video", () => {
 
   // Then the light video is hidden rather than showing a white square
   assert.equal(browser.videoVisibility(), "hidden");
-  assert.equal(browser.videoSrc(), "assets/videos/logo-loader-light.mp4");
+  assert.equal(browser.videoSrc(), "assets/logo-loader-light-test.mp4");
 });
 
-test("critical CSS is scoped to our class and the auth/loading screens", () => {
+test("the loader video is restored on an authenticated route", () => {
+  // Given a dark HA theme with a dark loader on the sign-in screen
+  const browser = createBrowser({
+    hash: "#/signin",
+    parentVars: DARK_PARENT,
+    darkLoader: DARK_LOADER
+  });
+  browser.load();
+  browser.bootApp();
+  assert.equal(browser.videoSrc(), DARK_LOADER);
+
+  // When the app lands on an authenticated route
+  browser.setHash("#/dashboard");
+
+  // Then the light loader is restored and our marker removed
+  assert.equal(browser.videoSrc(), "assets/logo-loader-light-test.mp4");
+  assert.equal(browser.videoVisibility(), "");
+  assert.equal(browser.authDarkClass(), false);
+});
+
+test("critical CSS is scoped to our class and adds no Ghost overrides", () => {
   // Given the critical stylesheet inserted on an ingress admin page
-  const browser = createBrowser({hash: "#/signin", parentVars: DARK_PARENT});
+  const browser = createBrowser({
+    hash: "#/signin",
+    parentVars: DARK_PARENT,
+    siteIcon: SITE_ICON
+  });
   browser.load();
   const css = browser.styleText();
 
-  // Then every rule hangs off our own class, never Ghost's global state
-  assert.match(css, /html\.ha-auth-dark \.gh-flow/);
-  assert.match(css, /html\.ha-auth-dark \.ember-load-indicator video/);
+  // Then every rule hangs off our own marker class, never Ghost's
+  assert.match(css, /html\.ha-auth-dark/);
+  assert.match(css, /html\.ha-auth-dark body/);
   assert.doesNotMatch(css, /html\.dark/);
-  assert.doesNotMatch(css, /html\.ha-auth-dark body/);
+  assert.doesNotMatch(css, /gh-flow/);
+  assert.doesNotMatch(css, /ember-load-indicator/);
 });
 
 test("the add-on logo replaces the site icon on the auth screens", () => {
@@ -620,7 +702,7 @@ test("the add-on logo replaces the site icon on the auth screens", () => {
   const light = createBrowser({
     hash: "#/signin",
     parentVars: LIGHT_PARENT,
-    siteIcon: "assets/ha-admin-theme-logo.png"
+    siteIcon: SITE_ICON
   });
 
   // When the script loads under either HA theme
@@ -628,15 +710,18 @@ test("the add-on logo replaces the site icon on the auth screens", () => {
   const dark = createBrowser({
     hash: "#/signin",
     parentVars: DARK_PARENT,
-    siteIcon: "assets/ha-admin-theme-logo.png"
+    siteIcon: SITE_ICON
   });
   dark.load();
 
-  // Then the rule overrides Ghost's inline site-icon background in both modes
-  const rule =
-    '.gh-flow .gh-site-icon { background-image: url("assets/ha-admin-theme-logo.png") !important;';
-  assert.ok(light.styleText().includes(rule));
-  assert.ok(dark.styleText().includes(rule));
+  // Then Ghost's React auth header image is hidden and the add-on logo is
+  // drawn in its place, in both modes
+  const hideRule = "html.ha-auth-dark header > img { display: none; }";
+  const logoRule = `background-image: url("${SITE_ICON}")`;
+  for (const browser of [light, dark]) {
+    assert.ok(browser.styleText().includes(hideRule), hideRule);
+    assert.ok(browser.styleText().includes(logoRule), logoRule);
+  }
 });
 
 test("the site icon rule is absent without the logo attribute", () => {
@@ -647,7 +732,7 @@ test("the site icon rule is absent without the logo attribute", () => {
   browser.load();
 
   // Then Ghost's own site icon is left alone
-  assert.doesNotMatch(browser.styleText(), /gh-site-icon/);
+  assert.doesNotMatch(browser.styleText(), /ha-admin-theme-logo/);
 });
 
 test("critical style is inserted once", () => {

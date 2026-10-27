@@ -2,7 +2,10 @@
 
 Guards against the defects found in the original template: unpinned
 packages, a COPY of a directory that does not exist, and missing
-build context files.
+build context files. It also pins the Ghost 6 build shape: the release
+is installed with pnpm (pnpm 12 is pinned in the Ghost package), its
+better-sqlite3 native dependency is verified before handover, and no
+Python is needed anywhere.
 
 Every test follows Given-When-Then.
 """
@@ -65,35 +68,47 @@ def test_ghost_cli_is_pinned_not_latest():
         assert re.search(r"ghost-cli@\d+\.\d+\.\d+", line), f"ghost-cli version not pinned: {line}"
 
 
-def test_python_installed_in_build_stage_only():
-    # Given ghost-cli 1.33.x refuses to install Ghost 5 on Node 22 without
-    # a usable Python (it checks python3, plus setuptools for 3.12+)
+def test_pnpm_is_pinned_not_latest():
+    # Given Ghost 6 ships a pnpm lockfile, so ghost-cli installs the
+    # release with pnpm (and checks that pnpm, or corepack, is present)
     # When the Dockerfile is checked
-    # Then Python is installed in the (discarded) build stage only: the
-    # final image carries no Python at all
+    # Then pnpm is installed at an explicit version in the build stage
+    # (reproducible, and new enough to install the pnpm 12 pin)
+    npm_lines = [line for line in read_lines() if "npm install" in line and "pnpm" in line]
+    assert npm_lines, "Dockerfile must install pnpm to install Ghost 6"
+    for line in npm_lines:
+        assert "@latest" not in line, f"pnpm must not be unpinned: {line}"
+        assert re.search(r"pnpm@\d+\.\d+\.\d+", line), f"pnpm version not pinned: {line}"
+    assert "pnpm@12." in "\n".join(npm_lines), "the pinned pnpm must be the 12 line Ghost requires"
+
+
+def test_no_python_is_installed_or_needed():
+    # Given Ghost 6.50+ replaced sqlite3 with better-sqlite3, whose
+    # prebuilt binaries the Ghost CLI accepts without the Python/setuptools
+    # check that Ghost 5 needed on Node 22
+    # When the Dockerfile is checked
+    # Then no stage installs Python, and the final image installs nothing
     content = DOCKERFILE.read_text(encoding="utf-8")
-    assert re.search(r"apt-get install .*python3", content), "python3 must be installed (build stage)"
-    assert "python3-setuptools" in content, "setuptools is required for the trixie Python 3.13"
-    assert "apt-get" not in final_stage(), (
-        "the final image must not install any packages (no Python)"
+    assert "python3" not in content and "setuptools" not in content, (
+        "Ghost 6 needs no Python (better-sqlite3 ships prebuilt binaries)"
     )
+    assert "apt-get" not in final_stage(), "the final image must not install any packages"
 
 
 def test_no_c_toolchain_anywhere():
-    # Given the sqlite3 native module is used as a prebuilt binary
+    # Given the better-sqlite3 native module is used as a prebuilt binary
     # (downloaded at build time, never compiled)
     # When the Dockerfile is checked
     # Then no C toolchain package appears in any stage
     content = DOCKERFILE.read_text(encoding="utf-8")
     assert "build-essential" not in content and "build-base" not in content, (
-        "no C toolchain is needed: sqlite3 is installed from its prebuilt binary"
+        "no C toolchain is needed: better-sqlite3 is installed from its prebuilt binary"
     )
 
 
 def test_ghost_app_is_installed_at_build_time():
     # Given the add-on ships the Ghost application in the image (so a fresh
-    # container starts without any download, and no Python is needed at
-    # runtime)
+    # container starts without any download and no Python is needed at all)
     # When the Dockerfile is checked
     # Then the pinned Ghost version is installed into /opt/ghost in a
     # discarded stage and handed over to the final image
@@ -106,22 +121,35 @@ def test_ghost_app_is_installed_at_build_time():
     assert "ghost install" not in final_stage(), (
         "the app must not be (re)installed in the final image"
     )
-    assert "npm install" not in final_stage() or "sqlite3" in final_stage(), (
+    assert "npm install" not in final_stage(), (
         "no runtime package installs in the final image"
     )
 
 
-def test_build_time_sqlite3_staging_not_in_tmp():
-    # Given the build-time heal runs 'prebuild-install' from the staging
-    # directory (an executed file), mirroring the runtime lesson that
-    # executed files must not live in /tmp
-    # When the Dockerfile staging default is checked
-    # Then it stages inside the app directory, not in /tmp
+def test_better_sqlite3_is_verified_at_build_time():
+    # Given Ghost 6 depends on better-sqlite3 as an optional dependency
+    # whose native binary is downloaded by its install script
+    # When the Dockerfile is checked
+    # Then the build verifies the module loads before handover, so a
+    # missing prebuild fails the build instead of crash-looping Ghost
     content = DOCKERFILE.read_text(encoding="utf-8")
-    staging_lines = [line for line in content.splitlines() if "sqlite3-staging" in line]
-    assert staging_lines, "the build-time heal must use a named staging directory"
-    default = staging_lines[0].split("sqlite3-staging", 1)[0]
-    assert "/opt/ghost" in default and "/tmp" not in default, staging_lines[0]
+    assert re.search(
+        r"require\('/opt/ghost/current/node_modules/better-sqlite3'\)", content
+    ), "the build must load better-sqlite3 to prove the native binary works"
+    assert "sqlite3@5.1.7" not in content, "Ghost 6 no longer uses the sqlite3 package"
+
+
+def test_pnpm_store_does_not_ship_in_the_final_image():
+    # Given ghost-cli installs the pnpm-locked release with a store inside
+    # /opt/ghost (so pnpm can hardlink), and the final image copies that dir
+    # When the Dockerfile is checked
+    # Then the build removes the store before the final COPY: node_modules
+    # keeps its hardlinks, and the store does not bloat the image
+    content = DOCKERFILE.read_text(encoding="utf-8")
+    assert "rm -rf /opt/ghost/.pnpm-store" in content, "the pnpm store must be removed"
+    assert ".pnpm-store" not in final_stage(), (
+        "the final stage must not reference the build-only pnpm store"
+    )
 
 
 def test_node_is_pinned_and_hash_verified():
