@@ -244,9 +244,11 @@ add-on that runs [Ghost](https://ghost.org/) inside Home Assistant with:
 
 ### CI/CD and metadata hygiene
 
-- `config.yaml` gained the required `image: crazyrokr/ghost-{arch}` field,
-  the correct port/ingress/webui values, the options/schema above, and a
-  valid `map`/arch set (validated by local tests that mirror hassfest).
+- `config.yaml` gained the required `image: crazyrokr/ha-ghost` field (a
+  plain multi-arch reference: the build workflow publishes one manifest for
+  all supported arches), the correct port/ingress/webui values, the
+  options/schema above, and a valid `map`/arch set (validated by local tests
+  that mirror hassfest).
 - The CI workflow now targets `main` (the repository branch), the base-image
   digest pin in `.github/docker-lock.json` matches the actual `FROM`, and
   Renovate no longer carries template rules for the old add-on.

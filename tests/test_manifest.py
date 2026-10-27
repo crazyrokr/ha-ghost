@@ -1,13 +1,14 @@
 """Validate the add-on manifest the way hassfest does.
 
 These checks mirror the hassfest add-on validation (required fields,
-slug/directory match, image template, arch list, map/ports/ingress
+slug/directory match, image reference, arch list, map/ports/ingress
 consistency). The real hassfest still runs in the repository CI; this
 suite makes the same guarantees available locally.
 
 Every test follows Given-When-Then.
 """
 
+import re
 from pathlib import Path
 
 import pytest
@@ -53,16 +54,19 @@ def test_slug_matches_addon_directory(manifest):
     assert manifest["slug"] == ADDON_DIR.name
 
 
-def test_image_template_contains_arch_placeholder(manifest):
-    # Given the manifest declares an image
-    # When inspected for the {arch} template placeholder
-    # Then it contains it so hassio can build per-arch images
-    assert "{arch}" in manifest["image"]
+def test_image_has_no_unknown_placeholders(manifest):
+    # Given the manifest declares an image: a plain multi-arch reference,
+    # or an {arch} template (the Supervisor substitutes known placeholders)
+    # When its placeholders are inspected
+    # Then no placeholder other than {arch} appears
+    placeholders = set(re.findall(r"\{[^}]+\}", manifest["image"]))
+    assert placeholders <= {"{arch}"}, f"unknown image placeholders: {sorted(placeholders)}"
 
 
 def test_image_template_is_well_formed(manifest):
     # Given the manifest declares an image
-    # When the template is rendered for each arch
+    # When it is rendered for each supported arch (the {arch} placeholder
+    # is optional; without it one multi-arch image serves every arch)
     # Then the result looks like a docker image reference
     for arch in manifest["arch"]:
         rendered = manifest["image"].replace("{arch}", arch)
