@@ -158,3 +158,30 @@ def test_renovate_ghost_app_rule_is_limited_to_ghost_5():
         assert rule.get("allowedVersions") in ("^5", "5.x", "5.*"), (
             f"the ghost application must be limited to the 5 line, got {rule.get('allowedVersions')!r}"
         )
+
+
+def test_gha_workflows_references_share_one_commit_pin():
+    # Given CI reuses the shared gha-workflows action and reusable workflow
+    # When their refs are collected
+    # Then every ref is the same full commit SHA (a branch or tag could
+    # move and change the pipeline behind the repository's back)
+    workflow = CICD.read_text(encoding="utf-8")
+    refs = set(re.findall(r"crazyrokr/gha-workflows/[^@\s]+@([0-9a-f]+)", workflow))
+    assert refs, "CI must reuse gha-workflows"
+    for ref in refs:
+        assert re.fullmatch(r"[0-9a-f]{40}", ref), f"not a full commit SHA: {ref}"
+    assert len(refs) == 1, f"gha-workflows references drift across commits: {sorted(refs)}"
+
+
+def test_test_dependencies_are_declared():
+    # Given the Python test suite imports PyYAML
+    # When CI installs tests/requirements.txt before running pytest
+    # Then PyYAML is declared there so the tests can import it
+    requirements = REPO_ROOT / "tests" / "requirements.txt"
+    assert requirements.is_file(), f"missing test requirements: {requirements}"
+    packages = {
+        line.split("==", 1)[0].strip().lower()
+        for line in requirements.read_text(encoding="utf-8").splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    }
+    assert "pyyaml" in packages, f"PyYAML not declared, got: {sorted(packages)}"

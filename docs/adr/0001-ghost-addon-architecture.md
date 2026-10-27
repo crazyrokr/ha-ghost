@@ -250,6 +250,16 @@ add-on that runs [Ghost](https://ghost.org/) inside Home Assistant with:
 - The CI workflow now targets `main` (the repository branch), the base-image
   digest pin in `.github/docker-lock.json` matches the actual `FROM`, and
   Renovate no longer carries template rules for the old add-on.
+- The pipeline runs the test suite through the shared `gha-workflows`
+  reusable test workflow before any image build: for every changed app it
+  detects the test files in `tests/` (Python via pytest, installing
+  `tests/requirements.txt` first; JavaScript via the project's
+  `npm test` when a `package.json` test script exists, otherwise through
+  Node's built-in runner, installing the `package.json` dependencies
+  first when that file is present). A failing test fails the test job,
+  and the build job depends on it, so no image is built or published.
+  Both `gha-workflows` references (the auto-locker action and the reusable
+  CI workflow) are pinned to the same full commit SHA.
 - Renovate manages the version pins in the Dockerfile through
   `customManagers` (regex): `NODE_VERSION` (npm `node`, limited to the 22
   line — Ghost 5.130.6 supports `^22.13.1`, and the build only ships glibc
@@ -279,7 +289,8 @@ add-on that runs [Ghost](https://ghost.org/) inside Home Assistant with:
 
 ## Verification
 
-- `tests/` (Python, Given-When-Then, 58 tests): manifest/hassfest-mirror
+- `tests/` (Python, Given-When-Then, 60 tests; run by CI before any build):
+  manifest/hassfest-mirror
   checks, Dockerfile structure (two-stage layout, build-time Ghost install
   into `/opt/ghost`, Python in the builder stage only, no package-install
   layer in the final stage, Node tarball hashes for both architectures),
