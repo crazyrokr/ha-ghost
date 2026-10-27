@@ -18,7 +18,14 @@ Assistant ingress path prefix, and the sidebar panel opens the admin
 panel. Updated 2026-10-27: ingress admin pages synchronize the sign-in,
 setup, reset and boot loading screens with the active Home Assistant
 theme (see Admin theme synchronization); the authenticated panel keeps
-Ghost's own Night shift and direct access is unchanged.
+Ghost's own Night shift and direct access is unchanged. Updated
+2026-10-27: the add-on ships Ghost 6.73.0, whose release is pnpm-locked and
+whose SQLite driver is better-sqlite3; the build installs a pinned pnpm and
+needs no Python (see Base image and Node, SQLite default), and the ingress
+admin theme targets Ghost 6's React admin (see Admin theme
+synchronization). Ghost 6 also requires MySQL 8 for the external database:
+MariaDB is no longer supported by Ghost, so the add-on's `db_type: mysql`
+backend now means MySQL 8.
 
 ## Context
 
@@ -29,8 +36,8 @@ files, CI targeting the `master` branch). The goal is a working, maintainable
 add-on that runs [Ghost](https://ghost.org/) inside Home Assistant with:
 
 - a zero-database default (works out of the box),
-- an optional external MariaDB/MySQL database selectable from the add-on
-  options,
+- an optional external MySQL 8 database selectable from the add-on
+  options (Ghost 6 dropped MariaDB support),
 - ingress and exposed-port access,
 - reproducible, digest-pinned builds for aarch64 and amd64.
 
@@ -45,25 +52,29 @@ add-on that runs [Ghost](https://ghost.org/) inside Home Assistant with:
   selected per `BUILD_ARCH` (the build argument the Home Assistant builder
   passes).
 - **Multi-stage build.** A `node` stage downloads the hash-verified tarball
-  once; the `app` stage copies `/usr/local` from it, installs Python and the
-  Ghost CLI, and installs the Ghost application into `/opt/ghost`; the final
+  once; the `app` stage copies `/usr/local` from it, installs the Ghost CLI
+  and pnpm, and installs the Ghost application into `/opt/ghost`; the final
   stage copies only the node binary (`COPY --from=node /usr/local/bin/node`)
   and the application tree (`COPY --from=app /opt/ghost`). The published
-  image therefore carries no Python, no Ghost CLI, and no npm: they exist
-  only in the discarded stages. The runtime only executes `node`, so the
-  npm, corepack, header, and share trees never reach the final image.
-- **Node 22, not the distro's Node 20**: ghost-cli 1.33.7 pulls an execa
-  release that needs Node >= 22.12, and Ghost 5.130.6 supports
-  `^18.12.1 || ^20.11.1 || ^22.13.1`. Ghost 6.x was rejected: its CLI flow
-  requires pnpm 12, which is not available on trixie.
-- **ghost-cli 1.33.7 is pinned** in the Dockerfile (builder stage only) and
-  kept current by Renovate.
+  image therefore carries no Python, no Ghost CLI, and no npm or pnpm: they
+  exist only in the discarded stages. The runtime only executes `node`, so
+  the npm, corepack, header, and share trees never reach the final image.
+- **Node 22, not the distro's Node 20**: ghost-cli 1.34.0 requires
+  `^22.13.0 || ^24.0.0`, and Ghost 6.73.0 requires
+  `^22.23.1 || ^24.20.0`. The shared `node` stage pins v22.23.4, the 22 LTS
+  patch that satisfies both.
+- **ghost-cli 1.34.0 and pnpm 12.10.1 are pinned** in the Dockerfile
+  (builder stage only) and kept current by Renovate. Ghost 6 releases carry
+  a `pnpm-lock.yaml`, so ghost-cli installs them with pnpm and checks at
+  install time that pnpm (or corepack) is available; installing the same
+  pnpm version Ghost pins avoids corepack's package-signing key drift and
+  an extra download.
 
 ### First-boot install flow
 
 - The application is installed **at build time** in the `app` stage with
-  `ghost install 5.130.6 local --dir /opt/ghost --no-start --no-setup
-  --db client --port 2368 --ip 0.0.0.0` and ships in the final image at
+  `ghost install 6.73.0 local --dir /opt/ghost --no-start --no-setup` and
+  ships in the final image at
   `/opt/ghost`, owned by the `ghost` user (its `current` symlink points
   into `/opt/ghost/versions/<version>`).
 - `etc/cont-init.d/99-ghost` (bashio) runs before the s6 service and
@@ -88,7 +99,7 @@ add-on that runs [Ghost](https://ghost.org/) inside Home Assistant with:
   started with the base image's built-in `runuser` (no su-exec package).
 - The generated config binds `0.0.0.0:2368` (the exposed port; ingress
   traffic reaches Ghost through the URL rewriter on 2369, see Ingress URL
-  rewriting) and sets the built-in SQLite database. Two Ghost 5 loader
+  rewriting) and sets the built-in SQLite database. Two Ghost loader
   quirks shape it: the config key is `database` (not `db`; the app default
   is MySQL), and relative paths resolve against the *app* directory — so the
   content path and the SQLite file are absolute paths into the blog volume.
@@ -98,47 +109,33 @@ add-on that runs [Ghost](https://ghost.org/) inside Home Assistant with:
   image's application), and fails hard if no configured blog exists (s6
   reports the failure instead of crash-looping silently).
 
-### SQLite default: prebuilt binary, no C toolchain
+### SQLite default: better-sqlite3, prebuilt binary, no C toolchain
 
-- Ghost's `sqlite3` 5.1.7 is an *optional* dependency that is silently
-  dropped when its install script fails — without it Ghost exits silently
-  (`process.exit(2)` in `boot.js`) and the s6 service would restart forever
-  without log output. The add-on therefore verifies the module on every
-  boot and fails loudly when it is missing.
-- Ghost's own install (yarn, per the app's `yarn.lock`) pins
-  **prebuild-install 7.1.1**, whose napi-build-utils 1.0.2 computes the
-  N-API target with a lexicographic string comparison
-  (`'6' <= '10'`) that is false on Node >= 22.12 (napi v10): the prebuild
-  download is skipped and the source build fails without a compiler. A plain
-  `npm install sqlite3@5.1.7` resolves prebuild-install 7.1.3, which
-  downloads the prebuilt binary (published by TryGhost for
-  linux-x64/arm64) in seconds.
-- **Consequence:** the image carries no C toolchain (no build-essential).
-  The module is installed **at build time** by running that npm install in a
-  staging directory inside the application tree and copying the package into
-  `current/node_modules`, with a final `node -e "require('sqlite3')"` check;
-  the staging directory is removed before the stage is handed over. At
-  runtime the cont-init script only *verifies* the module (through the
-  blog's `current/` symlink) and fails loudly if the image is broken — no
+- Ghost 6 swapped the `sqlite3` package for **better-sqlite3** 12.11.1, an
+  *optional* dependency whose install script downloads a prebuilt binary.
+  The release's `pnpm-workspace.yaml` allows that build script
+  (`allowBuilds: better-sqlite3@12.11.1: true`, with `strictDepBuilds:
+  true`), so pnpm runs it during the build. Without the module Ghost exits
+  silently (`process.exit(2)` in `boot.js`) and the s6 service would
+  restart forever without log output.
+- **The build verifies the module.** After `pnpm install` the `app` stage
+  runs `node -e "require('/opt/ghost/current/node_modules/better-sqlite3')"`
+  (after removing the pnpm store), so a missing or broken prebuild fails
+  the image build instead of crash-looping at boot. At runtime the
+  cont-init script only *verifies* the module through the blog's
+  `current/` symlink and fails loudly if the image is broken — no
   download, no install, no network at runtime.
-- **The staging directory lives in the application tree, not in `/tmp`:**
-  Home Assistant mounts the container `/tmp` as a `noexec` tmpfs, where
-  `sh -c "prebuild-install ..."` fails with `Permission denied` (verified on
-  a real instance). The staging directory is therefore
-  `/opt/ghost/.sqlite3-staging` and is removed before the stage is handed
-  over to the final image.
-- The staging install runs with `--loglevel=error --no-update-notifier`:
-  the pinned sqlite3 5.1.7 tree is from 2023, so npm prints deprecation
-  warnings for its build-time-only dependencies (prebuild-install 7.x,
-  node-gyp 8, npmlog, …) at every install. Those transitive pins cannot be
-  bumped without replacing the pinned sqlite3 itself, so the noise is
-  suppressed instead; a failed install still aborts the build. (The
-  long-term silence would be Ghost 6, which swapped sqlite3 for
-  better-sqlite3 — blocked today by its pnpm 12 requirement, see above.)
-  `python3` and `python3-setuptools` are installed in the `app` stage only:
-  ghost-cli 1.33.x's SQLite3 dependency check hard-fails on Node 22 without
-  them, regardless of whether a build would happen — and the stage is
-  discarded, so the published image carries no Python.
+- **No Python and no C toolchain.** Ghost 6.50+ disabled ghost-cli's
+  SQLite/Python dependency check (`python-setuptools.ts` returns false for
+  `>= 6.50.0`), and better-sqlite3 ships prebuilt binaries. Neither
+  `python3`/`python3-setuptools` (which Ghost 5 needed on Node 22) nor
+  build-essential appears in any stage.
+- **pnpm store.** ghost-cli installs the pnpm-locked release with the store
+  at `/opt/ghost/.pnpm-store` (a sibling of `versions/`, so pnpm can
+  hardlink into node_modules and the invoking user can write it). The store
+  is a build artifact: the `app` stage removes it before `COPY --from=app
+  /opt/ghost`; node_modules keeps its hardlinks, so the published image
+  does not carry the store.
 - Trade-off accepted: the npm registry and the GitHub release assets must be
   reachable **at build time only**; a running container never downloads
   anything.
@@ -182,9 +179,10 @@ add-on that runs [Ghost](https://ghost.org/) inside Home Assistant with:
   and the mysql2 driver printed
   `Ignoring invalid configuration option passed to Connection: filename`
   (a warning today, an error in a future mysql2 release). Verified against
-  the Ghost 5.130.6 source (`core/server/data/db/connection.js` passes the
-  merged object to knex; `shared/config/utils.js` carries the ineffective
-  sanitizer) and the nconf 0.13.0 merge behavior. New config files are
+  the Ghost 6.73.0 source (`core/server/data/db/connection.js` passes the
+  merged object to knex; `core/shared/config/utils.js` carries the
+  ineffective sanitizer, applied in `loader.js`) and the nconf 0.13.0
+  merge behavior. New config files are
   therefore written without the section, and volumes created by earlier
   add-on versions are migrated in place on the next start: a node
   one-liner removes the section from `config.production.json` only while
@@ -193,9 +191,9 @@ add-on that runs [Ghost](https://ghost.org/) inside Home Assistant with:
   config the user edited by hand is left untouched, and the built-in
   database is published through the environment instead. The `settings`
   (`busyRetryMax`) and `migrate` keys the old section carried are dropped
-  as well: Ghost 5.130.6 reads neither (migrations run unconditionally,
+  as well: Ghost 6.73.0 reads neither (migrations run unconditionally,
   and `useNullAsDefault` plus the sqlite pool are added by Ghost's own
-  `configure()`).
+  `configure-knex.js`).
 - With `db_type: mysql`, all of `db_host`, `db_user`, `db_name` must be set;
   otherwise the add-on refuses to start (a half-configured external
   database would otherwise leave the blog on the built-in one while the
@@ -335,18 +333,21 @@ add-on that runs [Ghost](https://ghost.org/) inside Home Assistant with:
   `Referrer-Policy: no-referrer` to every response
   (`homeassistant/components/http/headers.py`), including the ingress
   panel page, so the browser sends no `Referer` with the admin app's
-  requests; same-origin GET requests carry no `Origin` either. Ghost's
-  origin check (`cookieCsrfProtection` in `session-service.js`) derives
-  the request origin from `Origin`/`Referer` and falls back to the
-  configured site URL, which differs from the origin stored in the
-  session at login (the Home Assistant origin). It then answers
-  `400 Request made from incorrect origin` (e.g. `Expected
-  'https://ha.example.com' received 'https://blog.example.com'`), and the
-  admin UI bounces back to the login page. For ingress requests that
-  carry neither header, the proxy supplies
-  `Referer: <session origin><prefix>/` - the origin the browser would
-  otherwise have sent - so the check matches. Existing `Origin`/`Referer`
-  values are never overridden, and direct-port requests are untouched.
+  requests; same-origin GET requests carry no `Origin` either. Ghost 6
+  additionally validates the origin of every admin request against the
+  admin URL (`assertRequestFromAdminOrigin` in
+  `core/server/auth/session/session-service.js`, login CSRF protection).
+  The login/setup POST carries the Home Assistant origin in `Origin`,
+  which is not the configured site URL, so Ghost answers
+  `400 Request made from incorrect origin` and the panel cannot sign in.
+  For ingress requests the proxy therefore presents the configured site
+  origin to Ghost consistently: an incoming `Origin` is rewritten to the
+  site origin, and `Referer` is set to `<site origin>/` (Home Assistant
+  sends none). The session stores that origin when it is created, so the
+  later session-origin checks match too. Without the `url` option the
+  proxy falls back to the site default (`http://localhost:2368`), which
+  is also the admin URL Ghost derives in that situation. Direct-port
+  requests are untouched.
 - **Response hygiene.** Rewritten responses drop the upstream `ETag`
   (the body differs per request), recompute `Content-Length`, add
   `Vary: X-Ingress-Path`, and are gzipped when the browser accepts it.
@@ -364,52 +365,46 @@ add-on that runs [Ghost](https://ghost.org/) inside Home Assistant with:
 
 ### Admin theme synchronization (ingress only)
 
-- **Why the login page is unthemed.** Ghost's admin dark mode ("Night
-  shift") is a per-user flag: after authentication `feature.fetch()` calls
-  `_setAdminTheme()` (`ghost/admin/app/services/feature.js`), which toggles
-  the `dark` class on `<html>` and enables the alternate stylesheet
-  `assets/ghost-dark-<hash>.css`. The sign-in, setup and reset routes have
-  no authenticated user, so that code never runs, and the auth layout
-  (`app/styles/layouts/auth.css`) hardcodes white backgrounds in both the
-  light and the dark bundle. Enabling the dark stylesheet alone is not
-  enough either: the light bundle's resolved text colors (for example the
-  sign-in heading's `#15171a`) stay in effect, so the heading would be dark
-  on a dark background.
+- **Why the auth screens need help.** Ghost 6's React admin ships a
+  complete dark theme behind a `dark` class (the token block in
+  `core/built/admin/assets/index-*.css`; `html.dark` also sets
+  `color-scheme: dark`). The application resolves it from the signed-in
+  user's `nightShift` preference (`useSettings` -> `setTheme`, toggling the
+  class on `<html>`), so the sign-in, setup and reset screens — which have
+  no user — render light. The default boot splash is also the light
+  (white-background) logo video.
 - **Scope.** Only ingress traffic (requests carrying a valid
   `X-Ingress-Path`) is themed. The exposed port bypasses the proxy
-  entirely, so direct access is unchanged: the admin there keeps Ghost's
-  own Night shift toggle, and the login page stays exactly as Ghost ships
-  it.
+  entirely, so direct access is unchanged and keeps Ghost's own Night
+  shift toggle.
 - **Injection.** The ingress proxy, inside its existing HTML rewrite path,
-  injects the source of `ha-admin-theme.js` into the Ghost admin document
-  immediately before `</head>`, inlined in a classic
-  `<script data-ha-admin-theme>` (a separate asset request would delay
-  first paint; the admin sets no CSP). The tag also carries
-  `data-dark-loader="assets/videos/logo-loader-dark-<hash>.mp4"` when the
-  build ships the dark boot-loader video, and
+  inlines `ha-admin-theme.js` immediately before `</head>` in a classic
+  `<script data-ha-admin-theme>` tag (a separate asset request would delay
+  first paint; the admin sets no CSP). The tag carries
+  `data-dark-loader="assets/logo-loader-dark-<hash>.mp4"` when the build
+  ships the dark boot-loader video, and
   `data-site-icon="assets/ha-admin-theme-logo.png"` when the add-on logo
-  shipped. No Ghost stylesheet link is injected: the script themes the
-  auth flow and the boot loader with its own critical stylesheet and never
-  touches Ghost's Night shift state.
+  shipped.
   The admin document is recognised as a GET `text/html` response whose
-  path contains the `/ghost/` segment, whose body carries the
-  `ghost-admin/config/environment` marker, and which is not a HEAD,
-  204/304 or compressed response. The injection runs after `rewriteText`,
-  so the URL and CSS rewriters never see the injected script.
+  path contains the `/ghost/` segment and whose body carries the boot
+  splash element (`id="boot-splash"`: Ghost 6's React index no longer has
+  the Ember-era `ghost-admin/config/environment` meta tag), and which is
+  not a HEAD, 204/304 or compressed response. The injection runs after
+  `rewriteText`, so the URL rewriter never sees the injected script.
 - **Startup discovery.** The script source (`GHOST_ADMIN_THEME_SCRIPT`,
   default `/usr/local/lib/ha-admin-theme/ha-admin-theme.js`) is read once
   when the proxy starts; when it is unreadable the proxy logs once and
   disables injection, and the add-on keeps serving everything else. The
-  dark loader video (`logo-loader-dark-*.mp4` under
+  dark loader video (`logo-loader-dark-*.mp4` directly under
   `GHOST_ADMIN_ASSETS_DIR`, default
-  `/opt/ghost/current/core/built/admin/assets`) is optional: exactly one
-  present means its path is stamped on the script tag, otherwise the
-  attribute is omitted.
+  `/opt/ghost/current/core/built/admin/assets` — Ghost 6 dropped the
+  Ember-era `videos/` subdirectory) is optional: exactly one present means
+  its path is stamped on the script tag, otherwise the attribute is omitted.
 - **No Ghost theme state.** The script never reads the admin session
-  cookie and never writes Ghost's `dark` class or its Night shift
-  stylesheet; the injected body is identical for every request. The proxy
-  keeps the existing response behaviour (the ETag is dropped because the
-  body is rewritten, the length is recomputed, `Vary: X-Ingress-Path`
+  cookie and never writes Ghost's `dark` class on `<html>` or its Night
+  shift preference; the injected body is identical for every request. The
+  proxy keeps the existing response behaviour (the ETag is dropped because
+  the body is rewritten, the length is recomputed, `Vary: X-Ingress-Path`
   remains) and adds no cookie dependency.
 - **Theme detection.** The script reads the HA theme from the same-origin
   ingress parent (`window.parent.getComputedStyle(documentElement)`):
@@ -419,50 +414,50 @@ add-on that runs [Ghost](https://ghost.org/) inside Home Assistant with:
   When the parent is self, cross-origin or carries no parseable color, the
   script falls back to `prefers-color-scheme`.
 - **Activation.** The script owns a private `ha-auth-dark` class on
-  `<html>`. It applies it immediately at load, before the body is parsed,
-  so the boot loading screen (the sidebar entry is the bare `/ghost/`)
-  follows the HA theme even on an authenticated document. Once the app has
-  booted (`.ember-load-indicator` is removed), the class is kept only on
-  explicit unauthenticated routes (`#/setup`, `#/setup/done`, `#/signin`,
-  `#/signin/verify`, `#/signup/...`, `#/reset/...`) and every other route,
-  including the empty hash, removes it, so it cannot reach the admin
-  panel. A logout (`#/signin`) re-applies it. The class is independent of
-  Ghost's theme, so no session flag is needed.
-- **Post-login loading.** After the session POST succeeds Ghost runs
-  `handleAuthenticationTask` (`populateUser` + `postAuthPreparation`:
-  config, features, settings, members) while the sign-in form stays on
-  screen with its button spinner (`GhTaskButton @showSuccess=false` keeps
-  the spinner until the transition). `_setAdminTheme()` may toggle Ghost's
-  own state during that window, but the script's private class is
-  independent of it: the hash is still an explicit unauthenticated route,
-  so the sign-in/loading screen keeps the HA theme until the route
-  commits. When the panel route appears the class is removed and Ghost's
-  Night shift takes over. There is no freeze or takeover detection
-  because the script never races Ghost for the same state.
-- **Critical stylesheet.** The script injects one `<style>` element
-  (idempotent) holding a complete dark theme for the auth flow and the
-  boot loader — every `.gh-flow`, `.gh-flow-content`, `.gh-flow-create`,
-  `.gh-signin`, `.gh-signup`, `.gh-setup`, `.gh-auth-email`, `.gh-input*`
-  and `.gh-loading-*` selector, plus the setup orb filter, using Ghost's
-  resolved dark palette (`#15171a`, `#1f2328`, `#2a3037`, `#131416`,
-  `#e3e6e8`, `#fafafb`). Every rule hangs off `html.ha-auth-dark`; there
-  are no `html`/`body` globals, so the stylesheet is inert whenever the
-  class is absent. It is present synchronously from script load, so no
-  first paint depends on an external stylesheet. The light boot-loader
-  video is a dark logo baked on white, so in dark mode the script swaps in
-  `logo-loader-dark-*.mp4` (hidden until the swap, to avoid a white
-  square) and hides the light video when no dark asset exists. When the
-  proxy supplies the add-on logo, the stylesheet also overrides
-  `.gh-flow .gh-site-icon`'s background image (with `!important`, to beat
-  Ghost's inline `site-icon-style`) in both light and dark modes, scaled
-  with `contain` and centred.
-- **What it cannot avoid.** The authenticated panel keeps Ghost's own Night
-  shift; when the HA theme and the account theme differ, the auth/loading
-  screens and the panel use different modes, and the change happens when
-  the panel route replaces the auth screen. That is a boundary between two
-  screens, not a flash inside the panel. The sign-in/loading screen stays
-  on the HA theme for the whole post-login wait; Ghost's own state change
-  does not re-theme it.
+  `<html>` and, while it is active, applies Ghost's own `dark` class to
+  the **React root** (`#root`), not to `<html>`. Ghost's dark token block
+  is `.dark { --... }`, so scoping it to `#root` themes every element
+  inside the React tree with Ghost's current palette while leaving the
+  application-owned `<html>` class untouched — there is no race with the
+  app's theme controller. The private class adds `color-scheme: dark` and
+  a dark body background for the boot splash, which lives outside `#root`.
+  The theme is applied immediately at load (the boot splash precedes the
+  React mount). The script detects the mount with the
+  `react-admin-mounted` class the React shell adds to `<body>`; after that
+  it keeps the theme only on explicit unauthenticated routes (`#/signin`,
+  `#/signin/verify`, `#/setup`, `#/signup/...`, `#/reset/...`) and
+  removes both markers on every other route, including the empty hash, so
+  they cannot reach the panel. A logout (`#/signin`) re-applies it.
+  Parent-theme mutations and `prefers-color-scheme` changes re-sync.
+- **Post-login loading.** After the session POST succeeds Ghost keeps the
+  sign-in form on screen with its button spinner while the user and
+  preferences load. The hash is still an unauthenticated route, so the
+  screen keeps the HA theme until the panel route commits. Because the
+  script never touches Ghost's `<html>` class, whichever `nightShift`
+  preference the application applies for the signed-in user takes effect
+  in the panel without a flash or a race.
+- **Critical stylesheet.** The script injects one idempotent `<style>`
+  element holding the scoped marker rules (`html.ha-auth-dark`) and, when
+  the proxy supplies the add-on logo, hides the React auth header's site
+  icon (`header > img[alt=""]`) and draws the add-on logo in its place
+  with a `::before` at the same 60 px size. It also replaces the Ghost orb
+  that the admin sidebar renders as its site icon
+  (`img[alt="Site icon"]`, Ghost 6's default `ghost-orb-1.png`) with the
+  add-on logo via `content: url(...)`; that rule is not scoped to the auth
+  marker, so the authenticated panel's sidebar shows the add-on branding
+  too. The dark styling itself is
+  Ghost's own `.dark` token block applied to `#root`; the add-on ships no
+  copy of Ghost's palette, so a Ghost update cannot leave stale colors.
+- **Boot loader.** Ghost 6's boot splash video is a light logo on white.
+  In dark mode the script swaps in `logo-loader-dark-*.mp4` (and hides the
+  light video when no dark asset exists), restoring the light source on
+  authenticated routes.
+- **What it cannot avoid.** If Ghost's `<html>` already carries `dark`
+  (for example the last signed-in user's Night shift), the sign-in screen
+  stays dark regardless of the HA theme — exactly as Ghost renders it; the
+  add-on deliberately does not override the application's global theme.
+  Everything the add-on controls inside `#root` otherwise follows the HA
+  theme.
 - **Files.** The proxy changes live in
   `root/usr/local/bin/ghost-ingress-proxy`; the browser script and the
   add-on logo are `root/usr/local/lib/ha-admin-theme/{ha-admin-theme.js,
@@ -479,13 +474,13 @@ add-on that runs [Ghost](https://ghost.org/) inside Home Assistant with:
   dark loader or site-icon attribute omitted when its asset is absent.
   Node tests load the real script into a fake DOM and cover: color parsing
   (including space-separated `rgb()`) and the luminance threshold; HA
-  parent versus `prefers-color-scheme` fallback; the loading screen themed
-  on authenticated panel loads; the class removed at boot on panel and
-  empty-hash routes; the post-login spinner keeping the HA theme while
-  Ghost toggles its own state; logout re-application; the dark loader
-  video swap and hide; the site-icon rule present only when the logo is
-  supplied; the scoped critical stylesheet; the single style element; and
-  observer/media re-sync.
+  parent versus `prefers-color-scheme` fallback; the React root receiving
+  the dark class while Ghost's `<html>` state is never written; the boot
+  splash themed on authenticated panel and empty-hash loads; the markers
+  removed at boot on panel routes; logout re-application; the dark loader
+  video swap, hide and restore; the site-icon rules (auth header and admin
+  sidebar) present only when the logo is supplied; the scoped critical
+  stylesheet; the single style element; and observer/media re-sync.
 
 ### CI/CD and metadata hygiene
 
@@ -514,11 +509,12 @@ add-on that runs [Ghost](https://ghost.org/) inside Home Assistant with:
   same full commit SHA.
 - Renovate manages the version pins in the Dockerfile through
   `customManagers` (regex): `NODE_VERSION` (npm `node`, declared once in the
-  shared `node` stage, limited to the 22 line — Ghost 5.130.6 supports
-  `^22.13.1`, and the build only ships glibc Node 22 tarballs),
-  `ghost-cli` (npm, builder stage only), and the
-  installed Ghost application version (npm `ghost`, limited to the 5 line
-  until Ghost 6's pnpm 12 requirement is revisited). A Node update PR
+  shared `node` stage, limited to the 22 line — Ghost 6.73.0 requires
+  `^22.23.1`, and the build only ships glibc Node 22 tarballs),
+  `ghost-cli` (npm, builder stage only), `pnpm` (npm, builder stage only,
+  installed at the version Ghost pins), and the installed Ghost
+  application version (npm `ghost`, limited to the 6 line; a major jump is
+  a reviewed change). A Node update PR
   changes `NODE_VERSION` only: the node stage downloads that release's
   `SHASUMS256.txt` from the same dist directory and verifies the
   architecture-specific tarball against the entry for its exact filename,
@@ -532,8 +528,8 @@ add-on that runs [Ghost](https://ghost.org/) inside Home Assistant with:
 ## Consequences
 
 - The add-on works with zero external services (built-in SQLite, persisted
-  in `/config/ghost`) and with an external MariaDB/MySQL when configured.
-- The published image is ~1.0 GB (the ~520 MB application tree ships in the
+  in `/config/ghost`) and with an external MySQL 8 when configured.
+- The published image is ~950 MB (the ~500 MB application tree ships in the
   layers) instead of ~622 MB with a first-boot install — at the benefit of a
   network-free first boot, a ~1.2 MB persisted volume (smaller HA backups),
   and add-on updates that deliver new Ghost versions without any user
@@ -544,26 +540,31 @@ add-on that runs [Ghost](https://ghost.org/) inside Home Assistant with:
   the one-time removal of the add-on-generated `database` section from the
   config file (content and everything else in the file are preserved; a
   hand-edited file is left untouched).
-- Ghost is pinned to the 5.x line (5.130.6); moving to Ghost 6 requires
-  revisiting the Node/pnpm decision.
+- Ghost is pinned to the 6.x line (6.73.0). Renovate proposes 6.x updates
+  only; a major upgrade (7.x) is a reviewed change because it may move the
+  Node engine, the package manager, the SQLite driver and the admin bundle
+  again.
 - Because bashio caches add-on options in `/tmp`, `tmpfs: true` is required
   for option changes to be picked up on container restart.
 
 ## Verification
 
-- `tests/` (Python, Given-When-Then, 110 tests; run by CI before any build):
+- `tests/` (Python, Given-When-Then, 115 tests; run by CI before any build,
+  plus 21 Node tests for the browser script):
   manifest/hassfest-mirror
   checks, Dockerfile structure (multi-stage layout with the Node pin in the
-  shared `node` stage, build-time Ghost install into `/opt/ghost`, Python in
-  the builder stage only, no package-install layer or npm in the final
-  stage, Node tarball hashes for both architectures),
+  shared `node` stage, build-time Ghost install into `/opt/ghost`, no Python
+  in any stage, no package-install layer or npm/pnpm in the final stage,
+  the pinned pnpm and the build-time better-sqlite3 verification, the pnpm
+  store removed before handover, Node tarball hashes for both
+  architectures),
   CI/renovate/lock consistency (incl. the renovate custom-manager pin
   extraction matched against the actual Dockerfile pins and the Node 22 /
-  Ghost 5 version caps), behavior tests for the s6 scripts
+  Ghost 6 version caps), behavior tests for the s6 scripts
   (first-boot volume setup with content seeding and config generation
   without a `database` section, legacy in-volume cleanup, the config-file
   migration of the add-on-generated `database` section — incl. the
-  user-edited-file guard and the idempotent re-run — the sqlite3
+  user-edited-file guard and the idempotent re-run — the better-sqlite3
   verification incl. the broken-image edge case, the sqlite and mysql
   option publishing (the mysql set without a `filename` variable),
   `log_console` on/off with stale-variable clearing, url/mail option
@@ -581,9 +582,9 @@ add-on that runs [Ghost](https://ghost.org/) inside Home Assistant with:
   scoped to the ingress prefix (the 2FA/login regression), root paths and
   already-prefixed paths being left alone, and direct access keeping
   Ghost's original cookie paths. The request-origin tests cover the
-  Referer injected when neither Origin nor Referer is present (Home
-  Assistant's no-referrer policy), and existing headers and direct access
-  being untouched.
+  Origin/Referer presented as the configured site origin (Ghost 6's
+  admin-origin check), the default origin used without the `url` option,
+  and direct access keeping the browser's headers untouched.
 - End-to-end in Docker: an add-on container with the real s6 init against a
   fake supervisor — a fresh volume boots with the image-resident
   application, creates `content/data/ghost.db`, and serves `/` and
@@ -591,7 +592,7 @@ add-on that runs [Ghost](https://ghost.org/) inside Home Assistant with:
   no error log entries; a legacy volume (522 MB, installed by an earlier
   add-on version) is migrated in place to the new layout (1.2 MB, content
   and database preserved); with `db_type: mysql` the same container runs
-  the migrations against a real MariaDB container (75 tables) and creates
+  the migrations against a real MySQL 8 container (102 tables) and creates
   no SQLite file; reverting the options clears the stale `database__*`
   variables and the blog returns to SQLite; setting the `url` option on an
   existing volume takes effect on the next start through the container
@@ -605,7 +606,7 @@ add-on that runs [Ghost](https://ghost.org/) inside Home Assistant with:
   the mail options clears the mail__* variables again.
 - Re-verified in Docker against the real s6 init and a fake supervisor
   (2026-10-22, the database and logging changes): a fresh volume with
-  `db_type: mysql` runs the migrations against a real MariaDB container
+  `db_type: mysql` runs the migrations against a real MySQL 8 container
   (75 tables), creates no SQLite file, and the container console carries
   no `Ignoring invalid configuration option passed to Connection:
   filename` warning (with the config file as written by earlier add-on
@@ -617,16 +618,36 @@ add-on that runs [Ghost](https://ghost.org/) inside Home Assistant with:
   application log lines while the log files in the volume keep them; and
   a restart of a mysql-configured container boots in ~1 s without the
   warning.
+- Ghost 6.73.0 (2026-10-27, Docker e2e): the rebuilt image boots a fresh
+  volume with the built-in better-sqlite3 database (Ghost 6 migrations,
+  `/` and `/ghost/` both HTTP 200; a restart boots in ~1.4 s) and a
+  freshly created volume works against MySQL 8.4 (102 tables, no
+  `filename` warning); MariaDB 11.8 fails the migration with
+  `ER_PARSE_ERROR` on the MySQL 8-only check constraints, which matches
+  Ghost 6's documented MySQL-8-only support. The admin document under
+  ingress is served with its relative asset paths untouched, the blog
+  front page under ingress has its root-relative and site-origin
+  references rewritten to the session prefix, and direct-port requests
+  are byte-identical with no theme injection. A full browser session
+  through a strip-prefix stand-in for the Home Assistant ingress layer
+  (Chromium): setup and sign-in render dark with the add-on logo when the
+  client prefers dark, the login POST is accepted with the `url` option
+  pointing at a different origin than the browser, the 2FA email code is
+  delivered through an SMTP relay and verified, and the authenticated
+  panel loads with the add-on markers removed and Ghost's own theme
+  class left to the app. The release is installed with pnpm and no Python
+  is present in any stage; the image is ~950 MB.
 - Admin theme synchronization (2026-10-27, automated): the Node suite
-  loads the real browser script into a fake DOM (19 tests: HA parent
+  loads the real browser script into a fake DOM (21 tests: HA parent
   versus `prefers-color-scheme`, color parsing in every supported form —
   including space-separated `rgb()` and invalid values — the luminance
   threshold, the loading screen on authenticated panel and empty-hash
   loads, the post-login spinner keeping the HA theme while Ghost toggles
   its own state, the class removal on panel routes and logout
   re-application, the dark loader video swap and hide, the site-icon rule,
-  and the auth/loader CSS scoping). The proxy behavior tests (13 new
-  tests; 113 Python tests in total) cover ingress script injection and the
+  and the auth/loader CSS scoping; the React-root scoping keeping Ghost's
+  own `<html>` theme state untouched). The proxy behavior tests (13 new
+  tests; 115 Python tests in total) cover ingress script injection and the
   asset attributes, the served site-icon PNG (GET/HEAD), cookie
   independence, untouched direct access/blog HTML/JSON,
   ETag/`Vary: X-Ingress-Path`, idempotency, a spoofed ingress header, and

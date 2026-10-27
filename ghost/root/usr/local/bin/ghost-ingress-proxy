@@ -44,10 +44,13 @@ const REWRITABLE_CONTENT_TYPE = /^(text\/html|application\/xhtml\+xml|text\/css)
 // when the build provides one, the hashed dark boot-loader video is passed to
 // it as a data attribute. Both are read once at startup; when the script is
 // missing the injection is disabled and the add-on keeps serving normally.
+// Ghost 6's admin is a React app whose index.html carries the boot splash
+// element; that element is the document marker (the Ember-era
+// 'ghost-admin/config/environment' meta tag is gone).
 const DEFAULT_ADMIN_ASSETS_DIR = '/opt/ghost/current/core/built/admin/assets';
 const DEFAULT_ADMIN_THEME_SCRIPT = '/usr/local/lib/ha-admin-theme/ha-admin-theme.js';
 const DEFAULT_ADMIN_THEME_LOGO = '/usr/local/lib/ha-admin-theme/logo.png';
-const ADMIN_DOCUMENT_MARKER = 'ghost-admin/config/environment';
+const ADMIN_DOCUMENT_MARKER = 'id="boot-splash"';
 const ADMIN_SCRIPT_MARKER = 'data-ha-admin-theme';
 const ADMIN_PATH = /(?:^|\/)ghost(?:\/|$)/;
 const ADMIN_ASSETS_DIR = process.env.GHOST_ADMIN_ASSETS_DIR || DEFAULT_ADMIN_ASSETS_DIR;
@@ -116,13 +119,14 @@ function parseSiteUrl(raw) {
 }
 
 function findDarkLoader(directory) {
-    const videosDir = path.join(directory, 'videos');
+    // Ghost 6 ships the hashed loaders next to the admin assets (the
+    // Ember-era build kept them in an assets/videos directory).
     let names;
     try {
-        names = fs.readdirSync(videosDir);
+        names = fs.readdirSync(directory);
     } catch (error) {
         console.error(
-            `ghost-ingress-proxy: cannot read the admin videos directory '${videosDir}': ${error.message}`
+            `ghost-ingress-proxy: cannot read the admin assets directory '${directory}': ${error.message}`
         );
         return null;
     }
@@ -131,11 +135,11 @@ function findDarkLoader(directory) {
     );
     if (matches.length !== 1) {
         console.error(
-            `ghost-ingress-proxy: expected exactly one logo-loader-dark-*.mp4 in '${videosDir}', found ${matches.length}`
+            `ghost-ingress-proxy: expected exactly one logo-loader-dark-*.mp4 in '${directory}', found ${matches.length}`
         );
         return null;
     }
-    return `assets/videos/${matches[0]}`;
+    return `assets/${matches[0]}`;
 }
 
 function readThemeScript(file) {
@@ -427,15 +431,37 @@ function upstreamHeaders(request, context) {
     // Bodies are decoded by the proxy so rewritten responses can be edited;
     // the client-facing compression is applied by the proxy itself.
     headers['accept-encoding'] = 'identity';
-    // Home Assistant serves its pages with 'Referrer-Policy: no-referrer',
-    // so the admin page's requests carry no Referer, and same-origin GET
-    // requests carry no Origin either. Ghost derives the request origin
-    // from those headers and falls back to the configured site URL, which
-    // differs from the origin stored in the session at login (the Home
-    // Assistant origin) - its CSRF check then rejects the request with
-    // "Request made from incorrect origin". Supply the browser-facing
-    // origin the client would have sent when neither header is present.
-    if (
+    // Ghost 6 validates the admin request origin against the admin URL
+    // (the configured site URL unless admin.url is set), for login CSRF
+    // protection: assertRequestFromAdminOrigin in
+    // core/server/auth/session/session-service.js. Through ingress the
+    // browser's Origin is the Home Assistant origin, which is not that URL,
+    // so the login POST would be rejected with "Request made from
+    // incorrect origin" and the session would store the wrong origin.
+    //
+    // Present the configured site origin to Ghost consistently: the
+    // Origin header (the login POST) and the Referer (used by the same
+    // session check for requests that carry no Origin; Home Assistant
+    // serves its pages with Referrer-Policy: no-referrer, so the admin
+    // page usually sends none) both name the site origin. The session
+    // stores that origin at login and later requests match it.
+    //
+    // Without the 'url' option SITE falls back to Ghost's own default site
+    // URL (http://localhost:2368), which is also the admin URL Ghost
+    // derives in that situation, so the check still matches. If the option
+    // is set to an unparseable value, SITE is null and the proxy can only
+    // inject the Home Assistant Referer for requests that carry no origin
+    // header at all (login would still fail; the README tells the user to
+    // set a valid URL). The Home Assistant origin is still used for
+    // rewriting Location/absolute URLs to the ingress path (see
+    // rewriteLocation).
+    if (context && SITE) {
+        if (headers.origin !== undefined) {
+            headers.origin = SITE.origin;
+        }
+        headers.referer = `${SITE.origin}/`;
+        delete headers.referrer;
+    } else if (
         context
         && context.origin
         && headers.origin === undefined

@@ -5,7 +5,7 @@
 # see the Dockerfile). This script prepares the persisted blog volume:
 # a one-time cleanup of the legacy in-volume app layout, config
 # generation on the first boot, the migration of the add-on-generated
-# database section out of the config file, the sqlite3 module check, and
+# database section out of the config file, the better-sqlite3 module check, and
 # the url, log, mail, and database options. Re-runs are no-ops.
 # GHOST_BLOG_DIR defaults to the add-on config directory.
 # ==============================================================================
@@ -70,7 +70,7 @@ if [ ! -f "$BLOG_DIR/config.production.json" ]; then
     # start (and, for volumes created by earlier add-on versions, the
     # section is migrated out of the file, see further down).
     #
-    # Ghost 5 resolves relative paths against the app directory, so the
+    # Ghost resolves relative paths against the app directory, so the
     # content path must be an absolute path into the blog volume.
     if [ -n "${URL}" ]; then
         URL_LINE="\"url\": \"${URL}\","
@@ -131,13 +131,13 @@ if (generated) {
 ' "$BLOG_DIR/config.production.json" "${BLOG_DIR}/content/data/ghost.db"
 fi
 
-# The sqlite3 driver ships with the image's application (installed at
-# build time from the prebuilt binary, no C toolchain). Without it Ghost
+# The better-sqlite3 driver ships with the image's application (installed
+# at build time from the prebuilt binary, no C toolchain). Without it Ghost
 # would exit silently and the s6 service would crash-loop without any log
 # output, so verify on every boot (the blog's current/ symlink resolves
 # into the image) and fail loudly if the image is broken.
-if ! runuser -u ghost -- node -e "require('${BLOG_DIR}/current/node_modules/sqlite3')" 2>/dev/null; then
-    echo "ghost: sqlite3 native module is missing from the image application (${APP_DIR}); the image is broken, report this" >&2
+if ! runuser -u ghost -- node -e "require('${BLOG_DIR}/current/node_modules/better-sqlite3')" 2>/dev/null; then
+    echo "ghost: better-sqlite3 native module is missing from the image application (${APP_DIR}); the image is broken, report this" >&2
     exit 1
 fi
 

@@ -86,19 +86,22 @@ def dockerfile_pins():
     dockerfile = (REPO_ROOT / "ghost" / "Dockerfile").read_text(encoding="utf-8")
     node = re.search(r"ARG NODE_VERSION=v(\d+\.\d+\.\d+)", dockerfile)
     cli = re.search(r"ghost-cli@(\d+\.\d+\.\d+)", dockerfile)
+    pnpm = re.search(r"pnpm@(\d+\.\d+\.\d+)", dockerfile)
     app = re.search(r"ghost install (\d+\.\d+\.\d+) local", dockerfile)
-    assert node and cli and app, "Dockerfile must pin Node, Ghost CLI and the Ghost app"
-    return node.group(1), cli.group(1), app.group(1)
+    assert node and cli and pnpm and app, (
+        "Dockerfile must pin Node, Ghost CLI, pnpm and the Ghost app"
+    )
+    return node.group(1), cli.group(1), pnpm.group(1), app.group(1)
 
 
 def test_renovate_manages_dockerfile_pins():
     # Given renovate.json declares regex custom managers for the Ghost
-    # Dockerfile (Node, Ghost CLI, Ghost application version)
+    # Dockerfile (Node, Ghost CLI, pnpm, Ghost application version)
     # When each manager's matchString is run against the actual Dockerfile
     # Then the extracted values equal the real pins, so Renovate updates
     # them in place (the Node pin appears once, in the shared node stage)
     renovate = json.loads(RENOVATE.read_text(encoding="utf-8"))
-    node_pin, cli_pin, app_pin = dockerfile_pins()
+    node_pin, cli_pin, pnpm_pin, app_pin = dockerfile_pins()
     dockerfile = (REPO_ROOT / "ghost" / "Dockerfile").read_text(encoding="utf-8")
 
     def managers_for(dep_name, expected_pin):
@@ -144,6 +147,7 @@ def test_renovate_manages_dockerfile_pins():
         "the Node pin must appear once, in the shared node stage"
     )
     managers_for("ghost-cli", cli_pin)
+    managers_for("pnpm", pnpm_pin)
     managers_for("ghost", app_pin)
 
 
@@ -162,18 +166,19 @@ def test_renovate_node_rule_is_limited_to_node_22():
         )
 
 
-def test_renovate_ghost_app_rule_is_limited_to_ghost_5():
-    # Given Ghost 6 requires pnpm 12, which the image cannot provide
+def test_renovate_ghost_app_rule_is_limited_to_ghost_6():
+    # Given the image ships Ghost 6, whose release is installed with pnpm
+    # (the build stage provides a pinned pnpm 12)
     # When the ghost package rule is checked
-    # Then only 5.x updates are proposed
+    # Then only 6.x updates are proposed (a major jump is a reviewed change)
     renovate = json.loads(RENOVATE.read_text(encoding="utf-8"))
     rules = [
         r for r in renovate.get("packageRules", []) if "ghost" in r.get("matchPackageNames", [])
     ]
     assert rules, "no package rule for the ghost application"
     for rule in rules:
-        assert rule.get("allowedVersions") in ("^5", "5.x", "5.*"), (
-            f"the ghost application must be limited to the 5 line, got {rule.get('allowedVersions')!r}"
+        assert rule.get("allowedVersions") in ("^6", "6.x", "6.*"), (
+            f"the ghost application must be limited to the 6 line, got {rule.get('allowedVersions')!r}"
         )
 
 
