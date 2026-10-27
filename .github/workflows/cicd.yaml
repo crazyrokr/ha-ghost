@@ -9,6 +9,11 @@ on:
         type: string
         required: false
         default: ""
+      force_build:
+        description: "Force build"
+        type: boolean
+        required: false
+        default: false
   push:
     branches:
       - main
@@ -27,13 +32,15 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-      - uses: crazyrokr/gha-workflows/ha-addon-auto-locker@ffe7c3a3dcebdae3822b0e26e163af4f2fd3c0b5 # master
+      - uses: crazyrokr/gha-workflows/ha-addon-auto-locker@c03d56f69b5ae10ccfee1afaa56bce98e3a696ae # master
         with:
           branch: ${{ github.event.inputs.branch }}
           lookup_sources: Dockerfile
   run-builder:
     needs: auto-lock
-    uses: crazyrokr/gha-workflows/.github/workflows/ha-addon-cicd.yaml@ffe7c3a3dcebdae3822b0e26e163af4f2fd3c0b5 # master
+    uses: crazyrokr/gha-workflows/.github/workflows/ha-addon-cicd.yaml@c03d56f69b5ae10ccfee1afaa56bce98e3a696ae # master
+    with:
+      force_build: ${{ inputs.force_build || false }}
     secrets: inherit
     permissions:
       contents: read

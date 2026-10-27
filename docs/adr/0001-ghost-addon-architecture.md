@@ -261,8 +261,10 @@ add-on that runs [Ghost](https://ghost.org/) inside Home Assistant with:
   present). A `tests/` change runs the suite for every app without
   rebuilding; a change to an add-on's payload files tests and rebuilds
   that app; a change to the pipeline workflows tests and rebuilds every
-  app. A failing test fails the test job, and the build job depends on
-  it, so no image is built or published. Both `gha-workflows` references
+  app. A manual run can set `force_build` to test, build and publish
+  every app regardless of the changed files. A failing test fails the
+  test job, and the build job depends on it, so no image is built or
+  published. Both `gha-workflows` references
   (the auto-locker action and the reusable CI workflow) are pinned to the
   same full commit SHA.
 - Renovate manages the version pins in the Dockerfile through
