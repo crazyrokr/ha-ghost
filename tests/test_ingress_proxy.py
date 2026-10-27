@@ -287,8 +287,8 @@ def addon_fixture(tmp_path):
     thread.start()
     port = free_port()
     assets = tmp_path / "admin-assets"
-    assets.mkdir()
-    (assets / "ghost-dark-test.css").write_text("/* dark */", encoding="utf-8")
+    (assets / "videos").mkdir(parents=True)
+    (assets / "videos" / "logo-loader-dark-test.mp4").write_bytes(b"")
     process, log_path = start_proxy(
         node,
         port,
@@ -726,45 +726,45 @@ def test_referer_is_not_injected_for_direct_access(addon):
 def test_anonymous_ingress_admin_document_is_themed(addon):
     # Given an anonymous request through ingress for Ghost's admin document
     # When the proxy responds
-    # Then the dark stylesheet link and the inline theme script are injected
-    # before </head>, marked with the absent session state
+    # Then the inline theme script is injected before </head>, carrying the
+    # hashed dark loader video, and no Ghost dark stylesheet link is added
     status, _, payload = fetch(addon.port, "/ghost/", headers=INGRESS_HEADERS)
     body = payload.decode("utf-8")
     assert status == 200
     assert (
-        '<link id="dark-styles" rel="alternate stylesheet" title="dark" '
-        'href="assets/ghost-dark-test.css">'
+        '<script data-ha-admin-theme '
+        'data-dark-loader="assets/videos/logo-loader-dark-test.mp4">'
     ) in body
-    assert '<script data-ha-admin-theme data-session="absent">' in body
     assert "ha-admin-theme-style" in body
+    assert "dark-styles" not in body
     assert body.index("data-ha-admin-theme") < body.index("</head>")
 
 
-def test_an_admin_session_cookie_marks_the_document_present(addon):
-    # Given an ingress request that carries the admin session cookie
-    # When the admin document is served
-    # Then the injected script is marked present, so it stays inert at the
-    # empty-hash panel entry
-    _, _, payload = fetch(
+def test_the_admin_session_cookie_does_not_change_the_document(addon):
+    # Given the same admin document requested with and without the admin
+    # session cookie
+    # When both are served through ingress
+    # Then the injected markup is identical: the script no longer uses a
+    # session flag and never touches Ghost's authenticated theme
+    _, _, anonymous = fetch(addon.port, "/ghost/", headers=INGRESS_HEADERS)
+    _, _, authenticated = fetch(
         addon.port,
         "/ghost/",
         headers={**INGRESS_HEADERS, "Cookie": "ghost-admin-api-session=s1"},
     )
-    body = payload.decode("utf-8")
-    assert '<script data-ha-admin-theme data-session="present">' in body
-    assert '<script data-ha-admin-theme data-session="absent">' not in body
+    assert anonymous == authenticated
 
 
-def test_themed_admin_responses_drop_the_etag_and_vary_on_the_cookie(addon):
+def test_themed_admin_responses_drop_the_etag_and_vary_on_the_ingress_path(addon):
     # Given a themed admin document
     # When it passes the proxy through ingress
-    # Then the stale ETag is dropped, the length is recomputed and both the
-    # ingress path and the session cookie are announced as Vary keys
+    # Then the stale ETag is dropped, the length is recomputed and the
+    # response varies only on the ingress path (no cookie dependency)
     status, headers, payload = fetch(addon.port, "/ghost/", headers=INGRESS_HEADERS)
     assert status == 200
     assert "etag" not in headers
     assert "X-Ingress-Path" in headers["vary"]
-    assert "Cookie" in headers["vary"]
+    assert "Cookie" not in headers["vary"]
     assert int(headers["content-length"]) == len(payload)
 
 
@@ -801,13 +801,13 @@ def test_an_admin_path_without_the_document_marker_is_not_themed(addon):
 def test_injection_happens_after_url_rewriting(addon):
     # Given the admin document with root-relative asset references
     # When it is served through ingress
-    # Then the references are prefixed, while the injected relative href and
-    # the script source are left untouched
+    # Then the references are prefixed, while the injected script source is
+    # left untouched
     _, _, payload = fetch(addon.port, "/ghost/", headers=INGRESS_HEADERS)
     body = payload.decode("utf-8")
     assert f'href="{PREFIX}/assets/vendor.css"' in body
-    assert 'href="assets/ghost-dark-test.css"' in body
     assert "ha-admin-theme-style" in body
+    assert "dark-styles" not in body
 
 
 def test_an_invalid_ingress_header_never_injects_into_the_admin_document(addon):
@@ -831,27 +831,13 @@ def test_injection_is_idempotent(addon):
     assert payload.decode("utf-8").count("data-ha-admin-theme") == 1
 
 
-def test_injection_is_disabled_without_a_dark_stylesheet(tmp_path, theming_proxy):
-    # Given an assets directory with no ghost-dark-*.css
-    # When the admin document is served through ingress
-    # Then the page is still served and rewritten, but no theme is injected
-    empty = tmp_path / "empty-assets"
-    empty.mkdir()
-    proxy = theming_proxy(theme_env(tmp_path, empty))
-    status, _, payload = fetch(proxy.port, "/ghost/", headers=INGRESS_HEADERS)
-    body = payload.decode("utf-8")
-    assert status == 200
-    assert "data-ha-admin-theme" not in body
-    assert f'href="{PREFIX}/assets/vendor.css"' in body
-
-
 def test_injection_is_disabled_without_the_theme_script(tmp_path, theming_proxy):
-    # Given the dark stylesheet but a missing theme script
+    # Given a missing theme script
     # When the admin document is served through ingress
     # Then the page is still served, but no theme is injected
-    assets = tmp_path / "assets-with-dark"
-    assets.mkdir()
-    (assets / "ghost-dark-test.css").write_text("/* dark */", encoding="utf-8")
+    assets = tmp_path / "assets-with-video"
+    (assets / "videos").mkdir(parents=True)
+    (assets / "videos" / "logo-loader-dark-test.mp4").write_bytes(b"")
     proxy = theming_proxy(
         theme_env(tmp_path, assets, tmp_path / "missing-theme.js")
     )
@@ -859,6 +845,22 @@ def test_injection_is_disabled_without_the_theme_script(tmp_path, theming_proxy)
     body = payload.decode("utf-8")
     assert status == 200
     assert "data-ha-admin-theme" not in body
+    assert f'href="{PREFIX}/assets/vendor.css"' in body
+
+
+def test_the_dark_loader_attribute_is_omitted_without_the_video(tmp_path, theming_proxy):
+    # Given a build without the dark loader video
+    # When the admin document is served through ingress
+    # Then the script is still injected, without the dark loader attribute
+    assets = tmp_path / "assets-without-video"
+    assets.mkdir()
+    proxy = theming_proxy(theme_env(tmp_path, assets))
+    status, _, payload = fetch(proxy.port, "/ghost/", headers=INGRESS_HEADERS)
+    body = payload.decode("utf-8")
+    assert status == 200
+    assert "<script data-ha-admin-theme>" in body
+    assert 'data-dark-loader="' not in body
+    assert "ha-admin-theme-style" in body
     assert f'href="{PREFIX}/assets/vendor.css"' in body
 
 

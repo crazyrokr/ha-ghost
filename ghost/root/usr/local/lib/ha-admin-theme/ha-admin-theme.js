@@ -1,69 +1,68 @@
-/* Synchronizes Ghost's unauthenticated admin screens with the active Home
- * Assistant theme. The ingress proxy injects this script into the admin
- * document before </head>, tagged with data-session="absent" when the
- * request carried no admin session cookie and "present" when it did.
+/* Synchronizes the Ghost admin sign-in, setup and reset screens — and the
+ * boot loading screen — with the active Home Assistant theme. The ingress
+ * proxy injects this script into the admin document before </head>, with
+ * the hashed dark loader video in data-dark-loader when the build has one.
  *
- * It runs before the admin bundle: on an unauthenticated screen it applies
- * the HA theme (read from the same-origin ingress parent, falling back to
- * prefers-color-scheme) to the sign-in, setup and reset pages; on an
- * authenticated document it does nothing, so Ghost's own per-user Night
- * shift applies without a flash. The critical stylesheet below styles the
- * auth flow completely, so no first paint depends on the 588 KB
- * ghost-dark-<hash>.css being loaded.
+ * The script owns a private class (ha-auth-dark) and a critical stylesheet
+ * scoped to it. It never touches Ghost's own `dark` class or Night shift
+ * stylesheet, so the authenticated admin panel is completely unaffected:
+ * the class is removed as soon as the app has booted outside an
+ * unauthenticated route, and every rule is scoped to the auth flow or the
+ * boot loader.
  */
 (function () {
   "use strict";
 
   var STYLE_ID = "ha-admin-theme-style";
-  var DARK_LINK_ID = "dark-styles";
+  var THEME_CLASS = "ha-auth-dark";
   var SCRIPT_MARKER = "script[data-ha-admin-theme]";
   var EXPLICIT_UNAUTH_ROUTE = /^\/(?:setup|signin|signup|reset)(?:[/?]|$)/;
+  var LOADER_SELECTOR = ".ember-load-indicator";
+  var LOADER_VIDEO_SELECTOR = ".ember-load-indicator video";
 
   var CRITICAL_CSS = [
-    "html.dark { color-scheme: dark; }",
-    "html.dark, html.dark body { background-color: #15171a; }",
-    "html.dark body { color: #e3e6e8; border-top-color: #15171a; }",
-    "html.dark .gh-loading-content { background-color: #15171a; }",
-    "html.dark .gh-loading-spinner { border-color: rgba(255, 255, 255, 0.1); }",
-    "html.dark .gh-loading-spinner:before { background-color: #ffffff; }",
-    "html.dark .gh-flow { background: #15171a; }",
-    "html.dark .gh-flow:has(form:is(.gh-signin, .gh-signup)) { background: #15171a; }",
-    "html.dark .gh-flow-content { color: #e3e6e8; }",
-    "html.dark .gh-flow-content h1,",
-    "html.dark .gh-signin h1 { color: #fafafb; }",
-    "html.dark .gh-flow form label { color: #fafafb; }",
-    "html.dark .gh-setup .gh-flow-content p,",
-    "html.dark .gh-auth-email p { color: #7b8189; }",
-    "html.dark .gh-flow-content .gh-flow-create {",
+    "html.ha-auth-dark .ember-load-indicator video { visibility: hidden; }",
+    "html.ha-auth-dark .gh-loading-content { background-color: #15171a; }",
+    "html.ha-auth-dark .gh-loading-spinner { border-color: rgba(255, 255, 255, 0.1); }",
+    "html.ha-auth-dark .gh-loading-spinner:before { background-color: #ffffff; }",
+    "html.ha-auth-dark .gh-flow { color-scheme: dark; background: #15171a; }",
+    "html.ha-auth-dark .gh-flow:has(form:is(.gh-signin, .gh-signup)) { background: #15171a; }",
+    "html.ha-auth-dark .gh-flow-content { color: #e3e6e8; }",
+    "html.ha-auth-dark .gh-flow-content h1,",
+    "html.ha-auth-dark .gh-signin h1 { color: #fafafb; }",
+    "html.ha-auth-dark .gh-flow form label { color: #fafafb; }",
+    "html.ha-auth-dark .gh-setup .gh-flow-content p,",
+    "html.ha-auth-dark .gh-auth-email p { color: #7b8189; }",
+    "html.ha-auth-dark .gh-flow-content .gh-flow-create {",
     "    background: #1f2328;",
     "    border-color: #2a3037;",
     "    box-shadow: 0 20px 45px -10px rgba(0, 0, 0, 0.5);",
     "}",
-    "html.dark .gh-flow-content .gh-input,",
-    "html.dark :is(.gh-signin, .gh-signup) .gh-input {",
+    "html.ha-auth-dark .gh-flow-content .gh-input,",
+    "html.ha-auth-dark :is(.gh-signin, .gh-signup) .gh-input {",
     "    background: #15171a;",
     "    border-color: #131416;",
     "    color: #e3e6e8;",
     "}",
-    "html.dark .gh-signin .gh-input:focus:not(.gh-signin .gh-input.reset-password:focus),",
-    "html.dark .gh-signup .gh-input:focus,",
-    "html.dark .gh-flow-content .gh-input:focus {",
+    "html.ha-auth-dark .gh-signin .gh-input:focus:not(.gh-signin .gh-input.reset-password:focus),",
+    "html.ha-auth-dark .gh-signup .gh-input:focus,",
+    "html.ha-auth-dark .gh-flow-content .gh-input:focus {",
     "    background-color: #15171a;",
     "    border-color: #30cf43;",
     "    box-shadow: 0 0 0 3px rgba(48, 207, 67, 0.25);",
     "}",
-    "html.dark .gh-flow .gh-input::placeholder { color: #7c8b9a; }",
-    "html.dark .gh-flow .gh-input-icon svg { fill: #7b8189; }",
-    "html.dark .forgotten-wrap .forgotten-link { border-left-color: #2a3037; }",
-    "html.dark .forgotten-link span { color: #7b8189; }",
-    "html.dark .forgotten-link:hover span { color: #fafafb; }",
-    "html.dark .gh-signin .gh-btn-reset { background: #fafafb !important; }",
-    "html.dark .gh-signin .gh-btn-reset span { color: #15171a; }",
-    "html.dark .gh-flow-content .main-error { color: #f50b23; }",
-    "html.dark .gh-flow-content .main-notification { color: #fafafb; }",
-    "html.dark .gh-flow-content .pw-strength { background: rgba(21, 23, 26, 0.9); }",
-    "html.dark .gh-flow-content .pw-strength-dot { background-color: #394047; }",
-    "html.dark .gh-setup .gh-flow-content header svg { filter: invert(1); }"
+    "html.ha-auth-dark .gh-flow .gh-input::placeholder { color: #7c8b9a; }",
+    "html.ha-auth-dark .gh-flow .gh-input-icon svg { fill: #7b8189; }",
+    "html.ha-auth-dark .gh-flow .forgotten-wrap .forgotten-link { border-left-color: #2a3037; }",
+    "html.ha-auth-dark .gh-flow .forgotten-link span { color: #7b8189; }",
+    "html.ha-auth-dark .gh-flow .forgotten-link:hover span { color: #fafafb; }",
+    "html.ha-auth-dark .gh-flow .gh-signin .gh-btn-reset { background: #fafafb !important; }",
+    "html.ha-auth-dark .gh-flow .gh-signin .gh-btn-reset span { color: #15171a; }",
+    "html.ha-auth-dark .gh-flow-content .main-error { color: #f50b23; }",
+    "html.ha-auth-dark .gh-flow-content .main-notification { color: #fafafb; }",
+    "html.ha-auth-dark .gh-flow-content .pw-strength { background: rgba(21, 23, 26, 0.9); }",
+    "html.ha-auth-dark .gh-flow-content .pw-strength-dot { background-color: #394047; }",
+    "html.ha-auth-dark .gh-setup .gh-flow-content header svg { filter: invert(1); }"
   ].join("\n");
 
   function parseColor(value) {
@@ -153,30 +152,16 @@
     return EXPLICIT_UNAUTH_ROUTE.test(route);
   }
 
-  function isHomeRoute(route) {
-    return route === "" || route === "/";
-  }
-
   var scriptTag =
     window.document.currentScript ||
     window.document.querySelector(SCRIPT_MARKER);
-  var anonymousAtLoad = Boolean(
-    scriptTag && scriptTag.dataset && scriptTag.dataset.session === "absent"
-  );
+  var darkLoaderUrl =
+    scriptTag && scriptTag.dataset ? scriptTag.dataset.darkLoader || "" : "";
 
-  var lastApplied = null;
-  var frozen = false;
-  var seenRunning = false;
-  var ghostOwnsTheme = false;
-  var takeoverObserver = null;
-  var unfreezeObserver = null;
-
-  function shouldApply() {
-    var route = hashRoute();
-    if (isExplicitUnauthRoute(route)) return true;
-    if (isHomeRoute(route)) return anonymousAtLoad;
-    return false;
-  }
+  var booted = false;
+  var currentDark = false;
+  var originalLoaderSource = null;
+  var bootObserver = null;
 
   function ensureStyle() {
     if (window.document.getElementById(STYLE_ID)) return;
@@ -187,133 +172,89 @@
     target.appendChild(style);
   }
 
+  function loaderVideo() {
+    return window.document.querySelector(LOADER_VIDEO_SELECTOR);
+  }
+
+  function applyLoaderVideo(dark) {
+    var video = loaderVideo();
+    if (!video) return;
+    var source =
+      typeof video.querySelector === "function" ? video.querySelector("source") : null;
+    if (!source || typeof source.getAttribute !== "function") return;
+    if (originalLoaderSource === null) {
+      originalLoaderSource = source.getAttribute("src");
+    }
+    if (dark && darkLoaderUrl) {
+      if (source.getAttribute("src") !== darkLoaderUrl) {
+        source.setAttribute("src", darkLoaderUrl);
+        if (typeof video.load === "function") video.load();
+      }
+      if (video.style) video.style.visibility = "visible";
+      return;
+    }
+    if (dark) {
+      if (video.style) video.style.visibility = "hidden";
+      return;
+    }
+    if (
+      originalLoaderSource &&
+      source.getAttribute("src") !== originalLoaderSource
+    ) {
+      source.setAttribute("src", originalLoaderSource);
+      if (typeof video.load === "function") video.load();
+    }
+    if (video.style) video.style.visibility = "";
+  }
+
   function apply(dark) {
-    window.document.documentElement.classList.toggle("dark", dark);
-    var link = window.document.getElementById(DARK_LINK_ID);
-    if (link) link.disabled = !dark;
-    lastApplied = {
-      dark: Boolean(dark),
-      linkDisabled: link ? Boolean(link.disabled) : null
-    };
+    currentDark = Boolean(dark);
+    window.document.documentElement.classList.toggle(THEME_CLASS, currentDark);
+    applyLoaderVideo(currentDark);
   }
 
   function sync() {
-    if (frozen || ghostOwnsTheme) return;
-    if (!shouldApply()) return;
-    ensureStyle();
-    apply(isDark());
-  }
-
-  function currentState() {
-    var link = window.document.getElementById(DARK_LINK_ID);
-    return {
-      dark: window.document.documentElement.classList.contains("dark"),
-      linkDisabled: link ? Boolean(link.disabled) : null
-    };
-  }
-
-  function differsFromLastApplied() {
-    if (!lastApplied) return false;
-    var current = currentState();
-    return (
-      current.dark !== lastApplied.dark ||
-      current.linkDisabled !== lastApplied.linkDisabled
-    );
-  }
-
-  function disconnectObservers() {
-    if (takeoverObserver) {
-      takeoverObserver.disconnect();
-      takeoverObserver = null;
-    }
-    if (unfreezeObserver) {
-      unfreezeObserver.disconnect();
-      unfreezeObserver = null;
-    }
-  }
-
-  function onTakeoverCandidate() {
-    if (!frozen || ghostOwnsTheme) return;
-    if (!differsFromLastApplied()) return;
-    ghostOwnsTheme = true;
-    frozen = false;
-    disconnectObservers();
-  }
-
-  function observeTakeover() {
-    var Observer = window.MutationObserver;
-    if (typeof Observer !== "function") return;
-    if (takeoverObserver) takeoverObserver.disconnect();
-    takeoverObserver = new Observer(onTakeoverCandidate);
-    takeoverObserver.observe(window.document.documentElement, {
-      attributes: true,
-      attributeFilter: ["class"]
-    });
-    var link = window.document.getElementById(DARK_LINK_ID);
-    if (link) {
-      takeoverObserver.observe(link, {
-        attributes: true,
-        attributeFilter: ["disabled"]
-      });
-    }
-  }
-
-  function isTaskRunning() {
-    return Boolean(
-      window.document.querySelector('[data-test-task-button-state="running"]')
-    );
-  }
-
-  function unfreezeIfIdle() {
-    if (!frozen || ghostOwnsTheme) return;
-    if (isTaskRunning()) {
-      seenRunning = true;
+    if (!booted) {
+      ensureStyle();
+      apply(isDark());
       return;
     }
-    if (!seenRunning) return;
-    frozen = false;
-    disconnectObservers();
+    if (isExplicitUnauthRoute(hashRoute())) {
+      ensureStyle();
+      apply(isDark());
+    } else {
+      apply(false);
+    }
+  }
+
+  function checkBoot() {
+    if (booted) return;
+    if (window.document.readyState === "loading") return;
+    if (window.document.querySelector(LOADER_SELECTOR)) return;
+    booted = true;
+    if (bootObserver) {
+      bootObserver.disconnect();
+      bootObserver = null;
+    }
     sync();
   }
 
-  function observeUnfreeze() {
+  function watchBoot() {
     var Observer = window.MutationObserver;
-    if (typeof Observer !== "function") return;
-    if (unfreezeObserver) unfreezeObserver.disconnect();
-    unfreezeObserver = new Observer(unfreezeIfIdle);
-    unfreezeObserver.observe(window.document.body, {
-      childList: true,
-      subtree: true,
-      attributes: true
+    if (typeof Observer === "function") {
+      bootObserver = new Observer(function () {
+        applyLoaderVideo(currentDark);
+        checkBoot();
+      });
+      bootObserver.observe(window.document.documentElement, {
+        childList: true,
+        subtree: true
+      });
+    }
+    window.document.addEventListener("DOMContentLoaded", function () {
+      applyLoaderVideo(currentDark);
+      checkBoot();
     });
-  }
-
-  function onSubmit(event) {
-    var target = event && event.target;
-    if (!target || typeof target.closest !== "function") return;
-    if (!target.closest(".gh-flow")) return;
-    if (!shouldApply()) return;
-    frozen = true;
-    seenRunning = false;
-    observeTakeover();
-    observeUnfreeze();
-  }
-
-  function onRouteChange() {
-    var route = hashRoute();
-    if (isExplicitUnauthRoute(route)) {
-      frozen = false;
-      ghostOwnsTheme = false;
-      disconnectObservers();
-      sync();
-      return;
-    }
-    if (isHomeRoute(route)) {
-      sync();
-      return;
-    }
-    frozen = false;
-    disconnectObservers();
   }
 
   function watchColorScheme() {
@@ -354,7 +295,7 @@
   ensureStyle();
   watchColorScheme();
   watchParentTheme();
-  window.addEventListener("hashchange", onRouteChange);
-  window.document.addEventListener("submit", onSubmit, true);
-  sync();
+  watchBoot();
+  window.addEventListener("hashchange", sync);
+  apply(isDark());
 })();

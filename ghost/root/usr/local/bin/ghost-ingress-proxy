@@ -23,6 +23,7 @@
 
 const fs = require('fs');
 const http = require('http');
+const path = require('path');
 const zlib = require('zlib');
 const {URL} = require('url');
 
@@ -38,16 +39,15 @@ const BUFFER_LIMIT_BYTES = 16 * 1024 * 1024;
 const INGRESS_PATH_PATTERN = /^\/api\/hassio_ingress\/[A-Za-z0-9_-]+$/;
 const REWRITABLE_CONTENT_TYPE = /^(text\/html|application\/xhtml\+xml|text\/css)([;\s]|$)/i;
 
-// Admin theme synchronization: the ingress proxy injects Ghost's dark
-// stylesheet link and the theme script into the admin document. The dark
-// stylesheet name is hashed by the build and the script ships in the image;
-// both are read once at startup. When either is missing the injection is
-// disabled and the add-on keeps serving normally.
+// Admin theme synchronization: the ingress proxy injects the theme script
+// into the admin document before </head>. The script ships in the image and,
+// when the build provides one, the hashed dark boot-loader video is passed to
+// it as a data attribute. Both are read once at startup; when the script is
+// missing the injection is disabled and the add-on keeps serving normally.
 const DEFAULT_ADMIN_ASSETS_DIR = '/opt/ghost/current/core/built/admin/assets';
 const DEFAULT_ADMIN_THEME_SCRIPT = '/usr/local/lib/ha-admin-theme/ha-admin-theme.js';
 const ADMIN_DOCUMENT_MARKER = 'ghost-admin/config/environment';
 const ADMIN_SCRIPT_MARKER = 'data-ha-admin-theme';
-const ADMIN_SESSION_COOKIE = /(?:^|;\s*)ghost-admin-api-session=/;
 const ADMIN_PATH = /(?:^|\/)ghost(?:\/|$)/;
 const ADMIN_ASSETS_DIR = process.env.GHOST_ADMIN_ASSETS_DIR || DEFAULT_ADMIN_ASSETS_DIR;
 const ADMIN_THEME_SCRIPT_PATH =
@@ -112,24 +112,27 @@ function parseSiteUrl(raw) {
     }
 }
 
-function findDarkStylesheet(directory) {
+function findDarkLoader(directory) {
+    const videosDir = path.join(directory, 'videos');
     let names;
     try {
-        names = fs.readdirSync(directory);
+        names = fs.readdirSync(videosDir);
     } catch (error) {
         console.error(
-            `ghost-ingress-proxy: cannot read the admin assets directory '${directory}': ${error.message}`
+            `ghost-ingress-proxy: cannot read the admin videos directory '${videosDir}': ${error.message}`
         );
         return null;
     }
-    const matches = names.filter((name) => /^ghost-dark-.+\.css$/.test(name));
+    const matches = names.filter((name) =>
+        /^logo-loader-dark-[A-Za-z0-9._-]+\.mp4$/.test(name)
+    );
     if (matches.length !== 1) {
         console.error(
-            `ghost-ingress-proxy: expected exactly one ghost-dark-*.css in '${directory}', found ${matches.length}`
+            `ghost-ingress-proxy: expected exactly one logo-loader-dark-*.mp4 in '${videosDir}', found ${matches.length}`
         );
         return null;
     }
-    return matches[0];
+    return `assets/videos/${matches[0]}`;
 }
 
 function readThemeScript(file) {
@@ -143,13 +146,9 @@ function readThemeScript(file) {
     }
 }
 
-const DARK_STYLESHEET = findDarkStylesheet(ADMIN_ASSETS_DIR);
-const THEME_SCRIPT = DARK_STYLESHEET ? readThemeScript(ADMIN_THEME_SCRIPT_PATH) : null;
-const ADMIN_THEME_ENABLED = Boolean(DARK_STYLESHEET && THEME_SCRIPT);
-
-function requestHasAdminSession(request) {
-    return ADMIN_SESSION_COOKIE.test(String(request.headers.cookie || ''));
-}
+const THEME_SCRIPT = readThemeScript(ADMIN_THEME_SCRIPT_PATH);
+const DARK_LOADER = THEME_SCRIPT ? findDarkLoader(ADMIN_ASSETS_DIR) : null;
+const ADMIN_THEME_ENABLED = Boolean(THEME_SCRIPT);
 
 function isAdminDocument(request, contentType, body) {
     if (!ADMIN_THEME_ENABLED) {
@@ -177,11 +176,10 @@ function escapeClosingScript(text) {
     return text.replace(/<\/script/gi, '<\\/script');
 }
 
-function injectAdminTheme(body, anonymous) {
-    const session = anonymous ? 'absent' : 'present';
+function injectAdminTheme(body) {
+    const loaderAttribute = DARK_LOADER ? ` data-dark-loader="${DARK_LOADER}"` : '';
     const markup = [
-        `<link id="dark-styles" rel="alternate stylesheet" title="dark" href="assets/${DARK_STYLESHEET}">`,
-        `<script data-ha-admin-theme data-session="${session}">`,
+        `<script data-ha-admin-theme${loaderAttribute}>`,
         escapeClosingScript(THEME_SCRIPT),
         '</script>'
     ].join('\n');
@@ -374,9 +372,6 @@ function responseHeaders(upstreamResponse, options) {
         }
         appendVary(headers, 'X-Ingress-Path');
     }
-    if (options.injected) {
-        appendVary(headers, 'Cookie');
-    }
     if (options.gzip) {
         headers['content-encoding'] = 'gzip';
         appendVary(headers, 'Accept-Encoding');
@@ -435,12 +430,10 @@ function sendRewritten(request, response, upstreamResponse, context, chunks) {
     } catch (error) {
         body = original;
     }
-    let injected = false;
     const contentType = String(upstreamResponse.headers['content-type'] || '');
     try {
         if (isAdminDocument(request, contentType, body)) {
-            body = injectAdminTheme(body, !requestHasAdminSession(request));
-            injected = true;
+            body = injectAdminTheme(body);
         }
     } catch (error) {
         console.error(
@@ -452,7 +445,6 @@ function sendRewritten(request, response, upstreamResponse, context, chunks) {
     const headers = responseHeaders(upstreamResponse, {
         rewritten: true,
         context,
-        injected,
         gzip
     });
     if (gzip) {
