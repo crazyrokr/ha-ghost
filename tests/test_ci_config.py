@@ -95,7 +95,7 @@ def test_renovate_manages_dockerfile_pins():
     # Dockerfile (Node, Ghost CLI, Ghost application version)
     # When each manager's matchString is run against the actual Dockerfile
     # Then the extracted values equal the real pins, so Renovate updates
-    # them in place (the Node pin appears once per build stage)
+    # them in place (the Node pin appears once, in the shared node stage)
     renovate = json.loads(RENOVATE.read_text(encoding="utf-8"))
     node_pin, cli_pin, app_pin = dockerfile_pins()
     dockerfile = (REPO_ROOT / "ghost" / "Dockerfile").read_text(encoding="utf-8")
@@ -128,8 +128,8 @@ def test_renovate_manages_dockerfile_pins():
 
     node_manager = managers_for("node", node_pin)
     node_pattern = node_manager[0]["matchStrings"][0].replace("(?<", "(?P<")
-    assert len(re.findall(node_pattern, dockerfile)) == 2, (
-        "the Node pin appears once per stage; both must be updated together"
+    assert len(re.findall(node_pattern, dockerfile)) == 1, (
+        "the Node pin must appear once, in the shared node stage"
     )
     managers_for("ghost-cli", cli_pin)
     managers_for("ghost", app_pin)

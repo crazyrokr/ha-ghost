@@ -9,7 +9,9 @@ first-boot volume install to a two-stage image build (no Python in the final
 image). Updated 2026-10-22: the database is configured entirely through the
 container environment (the generated config file carries no `database`
 section, which removes a mysql2 `filename` warning with external databases),
-and the `log_console` option was added.
+and the `log_console` option was added. Updated 2026-10-27: Node is
+installed once in a shared `node` stage; the final image copies only the
+node binary instead of re-installing the whole distribution.
 
 ## Context
 
@@ -33,12 +35,16 @@ add-on that runs [Ghost](https://ghost.org/) inside Home Assistant with:
   (Debian 13 trixie, s6-overlay, bashio). The `home-assistant/docker-base`
   family provides no Node-based image (only alpine/debian/python/ubuntu), so
   the Node runtime comes from the official hash-verified Node 22 tarball,
-  selected per `TARGETARCH`.
-- **Two-stage build.** The `app` stage installs Node, Python, and the Ghost
-  CLI and installs the Ghost application into `/opt/ghost`; the final stage
-  re-installs the same Node tarball and copies only the application tree
-  (`COPY --from=app /opt/ghost`). The published image therefore carries no
-  Python and no Ghost CLI: they exist only in the discarded builder stage.
+  selected per `BUILD_ARCH` (the build argument the Home Assistant builder
+  passes).
+- **Multi-stage build.** A `node` stage downloads the hash-verified tarball
+  once; the `app` stage copies `/usr/local` from it, installs Python and the
+  Ghost CLI, and installs the Ghost application into `/opt/ghost`; the final
+  stage copies only the node binary (`COPY --from=node /usr/local/bin/node`)
+  and the application tree (`COPY --from=app /opt/ghost`). The published
+  image therefore carries no Python, no Ghost CLI, and no npm: they exist
+  only in the discarded stages. The runtime only executes `node`, so the
+  npm, corepack, header, and share trees never reach the final image.
 - **Node 22, not the distro's Node 20**: ghost-cli 1.33.7 pulls an execa
   release that needs Node >= 22.12, and Ghost 5.130.6 supports
   `^18.12.1 || ^20.11.1 || ^22.13.1`. Ghost 6.x was rejected: its CLI flow
@@ -268,9 +274,10 @@ add-on that runs [Ghost](https://ghost.org/) inside Home Assistant with:
   (the auto-locker action and the reusable CI workflow) are pinned to the
   same full commit SHA.
 - Renovate manages the version pins in the Dockerfile through
-  `customManagers` (regex): `NODE_VERSION` (npm `node`, limited to the 22
-  line — Ghost 5.130.6 supports `^22.13.1`, and the build only ships glibc
-  Node 22 tarballs), `ghost-cli` (npm, builder stage only), and the
+  `customManagers` (regex): `NODE_VERSION` (npm `node`, declared once in the
+  shared `node` stage, limited to the 22 line — Ghost 5.130.6 supports
+  `^22.13.1`, and the build only ships glibc Node 22 tarballs),
+  `ghost-cli` (npm, builder stage only), and the
   installed Ghost application version (npm `ghost`, limited to the 5 line
   until Ghost 6's pnpm 12 requirement is revisited). A Node update PR must
   also refresh the two per-architecture sha256 hashes (from the nodejs.org
@@ -284,11 +291,13 @@ add-on that runs [Ghost](https://ghost.org/) inside Home Assistant with:
   layers) instead of ~622 MB with a first-boot install — at the benefit of a
   network-free first boot, a ~1.2 MB persisted volume (smaller HA backups),
   and add-on updates that deliver new Ghost versions without any user
-  action. Volumes written by earlier add-on versions are migrated in place
-  on the first start, now including the one-time removal of the
-  add-on-generated `database` section from the config file (content and
-  everything else in the file are preserved; a hand-edited file is left
-  untouched).
+  action. The final stage carries only the node binary (~75 MB less than
+  the full distribution) instead of a second copy of the tarball tree, and
+  the tarball is downloaded once per build. Volumes written by earlier
+  add-on versions are migrated in place on the first start, now including
+  the one-time removal of the add-on-generated `database` section from the
+  config file (content and everything else in the file are preserved; a
+  hand-edited file is left untouched).
 - Ghost is pinned to the 5.x line (5.130.6); moving to Ghost 6 requires
   revisiting the Node/pnpm decision.
 - Because bashio caches add-on options in `/tmp`, `tmpfs: true` is required
@@ -298,9 +307,10 @@ add-on that runs [Ghost](https://ghost.org/) inside Home Assistant with:
 
 - `tests/` (Python, Given-When-Then, 60 tests; run by CI before any build):
   manifest/hassfest-mirror
-  checks, Dockerfile structure (two-stage layout, build-time Ghost install
-  into `/opt/ghost`, Python in the builder stage only, no package-install
-  layer in the final stage, Node tarball hashes for both architectures),
+  checks, Dockerfile structure (multi-stage layout with the Node pin in the
+  shared `node` stage, build-time Ghost install into `/opt/ghost`, Python in
+  the builder stage only, no package-install layer or npm in the final
+  stage, Node tarball hashes for both architectures),
   CI/renovate/lock consistency (incl. the renovate custom-manager pin
   extraction matched against the actual Dockerfile pins and the Node 22 /
   Ghost 5 version caps), and behavior tests for the s6 scripts

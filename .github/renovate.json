@@ -7,7 +7,7 @@
   "customManagers": [
     {
       "customType": "regex",
-      "description": "Node.js tarball version in the Ghost Dockerfile (declared once per stage)",
+      "description": "Node.js tarball version in the Ghost Dockerfile (declared once, in the shared node stage)",
       "managerFilePatterns": ["(^|/)ghost/Dockerfile$"],
       "matchStrings": ["NODE_VERSION=v(?<currentValue>\\d+\\.\\d+\\.\\d+)"],
       "depNameTemplate": "node",

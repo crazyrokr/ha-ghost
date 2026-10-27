@@ -150,7 +150,7 @@ available for extra data.
 ## Documentation
 
 - [`docs/adr/0001-ghost-addon-architecture.md`](docs/adr/0001-ghost-addon-architecture.md) —
-  architecture decision record: two-stage image build with the Ghost
+  architecture decision record: multi-stage image build with the Ghost
   application pre-installed (no Python in the final image), first-boot
   volume preparation, SQLite default with a prebuilt binary baked in at
   build time, external database via add-on options, and the removal of the
