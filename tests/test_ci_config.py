@@ -43,16 +43,21 @@ def test_cicd_triggers_on_default_branch():
 
 def test_docker_lock_pins_the_base_image():
     # Given the add-on builds on the hassio debian-base image
-    # When docker-lock.json is checked
-    # Then that exact base image reference is digest-pinned
+    # When docker-lock.json is checked against the Dockerfile's FROM line
+    # Then the image is recorded there, and when the FROM carries the
+    # digest the auto-locker appends, both digests agree (the lock keys by
+    # 'image:tag', so the FROM's '@sha256:...' suffix is not part of the key)
     assert DOCKER_LOCK.is_file(), f"missing lock file: {DOCKER_LOCK}"
     lock = json.loads(DOCKER_LOCK.read_text(encoding="utf-8"))
     dockerfile = (REPO_ROOT / "ghost" / "Dockerfile").read_text(encoding="utf-8")
     from_match = re.search(r"FROM (\S+)", dockerfile)
     assert from_match, "Dockerfile must declare a base image"
-    assert from_match.group(1) in lock, (
-        f"base image {from_match.group(1)} is not pinned in docker-lock.json"
-    )
+    image, _, digest = from_match.group(1).partition("@")
+    assert image in lock, f"base image {image} is not pinned in docker-lock.json"
+    if digest:
+        assert digest == lock[image], (
+            f"docker-lock.json pins {image} to {lock[image]}, the Dockerfile uses {digest}"
+        )
 
 
 def test_no_obsidian_template_leftovers():
