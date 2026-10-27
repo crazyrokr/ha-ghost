@@ -33,6 +33,11 @@ MariaDB/MySQL database can be selected through the add-on options instead.
   Ghost emits for the browser with the session's ingress path, and is only
   used for ingress traffic — direct port access is untouched. The sidebar
   panel and the **Open Web UI** button land on the admin panel.
+- **Theme-aware sign-in.** When the admin panel is opened through the Home
+  Assistant side panel, the sign-in, setup and reset screens follow the
+  active HA theme (light or dark), including the spinner while the account
+  loads after signing in. Direct-port access is unchanged, and the signed-in
+  admin keeps Ghost's own Night shift toggle.
 - **Safe by design.** The blog runs as a dedicated non-root `ghost` user; the
   container runs under the standard Home Assistant `debian-base` image with
   s6 supervision.

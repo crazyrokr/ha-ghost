@@ -547,7 +547,7 @@ add-on that runs [Ghost](https://ghost.org/) inside Home Assistant with:
 
 ## Verification
 
-- `tests/` (Python, Given-When-Then, 99 tests; run by CI before any build):
+- `tests/` (Python, Given-When-Then, 110 tests; run by CI before any build):
   manifest/hassfest-mirror
   checks, Dockerfile structure (multi-stage layout with the Node pin in the
   shared `node` stage, build-time Ghost install into `/opt/ghost`, Python in
@@ -613,3 +613,18 @@ add-on that runs [Ghost](https://ghost.org/) inside Home Assistant with:
   application log lines while the log files in the volume keep them; and
   a restart of a mysql-configured container boots in ~1 s without the
   warning.
+- Admin theme synchronization (2026-10-27, automated): the Node suite
+  loads the real browser script into a fake DOM (16 tests: HA parent
+  versus `prefers-color-scheme`, color parsing and luminance, the
+  activation matrix, hash-change deactivation and logout re-arm, the
+  submit freeze, Ghost takeover in both modes, failed-login re-arm, and
+  the single critical stylesheet). The proxy behavior tests (11 new
+  tests; 110 Python tests in total) cover anonymous and authenticated
+  ingress injection, the `data-session` flag, ETag/`Vary: Cookie`
+  handling, untouched direct access/blog HTML/JSON, the post-rewrite
+  injection order, idempotency, a spoofed ingress header, and disabled
+  injection with a missing stylesheet or script. Manual checks pending in
+  a Home Assistant instance: the side panel under dark and light HA
+  themes, sign-in to the panel with no unstyled gap during the spinner,
+  sign-out back to a themed sign-in, the setup screen, and the direct
+  2368 port unchanged.
