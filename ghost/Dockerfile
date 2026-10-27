@@ -3,8 +3,8 @@
 # from it. The checksum comes from the release's own SHASUMS256.txt rather
 # than a hardcoded per-architecture hash, so a Renovate version bump needs
 # no hash edits. The trixie nodejs package (20.x) is too old: ghost-cli
-# 1.33.7 pulls an execa release that needs Node >= 22.12, and Ghost 5.130.6
-# supports ^18.12.1 || ^20.11.1 || ^22.13.1.
+# 1.34.0 requires ^22.13.0 || ^24.0.0, and Ghost 6.73.0 requires
+# ^22.23.1 || ^24.20.0 (v22.23.4 is the pinned 22 LTS patch).
 FROM ghcr.io/hassio-addons/debian-base:32770e4@sha256:c16befd0489d0f873f66b41c1d028b8978dea70c93b606e9b1cf237c17b7abca AS node
 
 ARG BUILD_ARCH
@@ -35,17 +35,15 @@ RUN set -e; \
 
 FROM ghcr.io/hassio-addons/debian-base:32770e4@sha256:c16befd0489d0f873f66b41c1d028b8978dea70c93b606e9b1cf237c17b7abca AS app
 
-# ghost-cli's SQLite3 dependency check requires Python on Node 22 (it
-# validates python3, and setuptools separately for Python 3.13, which is
-# what trixie ships). Python stays in this stage only: the stage is
-# discarded once the application is installed, so the published image
-# carries no Python and no package-install layer.
-RUN apt-get update && apt-get install -y --no-install-recommends python3 python3-setuptools && rm -rf /var/lib/apt/lists/*
-
 COPY --from=node /usr/local /usr/local
 
-# Pinned Ghost CLI for reproducible builds (managed by Renovate)
-RUN npm install -g --no-audit --no-fund ghost-cli@1.34.0
+# Pinned Ghost CLI and pnpm for reproducible builds (managed by Renovate).
+# Ghost 6's release carries a pnpm lockfile, so ghost-cli installs it with
+# pnpm and checks at install time that pnpm (or corepack) is available.
+# Ghost pins pnpm 12 in its package; installing the same version here avoids
+# corepack's package-signing key drift and an extra download. Both stay in
+# this discarded stage.
+RUN npm install -g --no-audit --no-fund ghost-cli@1.34.0 pnpm@12.10.1
 
 # Ghost CLI refuses to run as root, and its install target must be an
 # empty directory owned by the non-root user.
@@ -55,27 +53,24 @@ RUN useradd --create-home --shell /bin/sh ghost && install -d -o ghost -g ghost 
 # this tree directly at runtime; the persisted volume holds only the
 # user's content and config, so a fresh container starts with no
 # download and add-on updates ship new Ghost versions.
-RUN runuser -u ghost -- ghost install 5.130.6 local --dir /opt/ghost --no-start --no-setup --db client --port 2368 --ip 0.0.0.0
+RUN runuser -u ghost -- ghost install 6.73.0 local --dir /opt/ghost --no-start --no-setup
 
-# Ghost's own install (run through yarn) pins prebuild-install 7.1.1,
-# which cannot resolve its N-API target on Node 22.12+ and therefore
-# silently drops the sqlite3 optionalDependency. A plain npm install of
-# the same package resolves a current prebuild-install that downloads
-# the prebuilt binary instead of compiling it, so no C toolchain is
-# needed in any stage. The staging directory lives in the app directory,
-# not in /tmp, and is removed before the stage is handed over.
+# Ghost 6 depends on better-sqlite3 (an optional dependency whose install
+# script downloads a prebuilt binary; the release's pnpm workspace allows
+# that build script), so no Python and no C toolchain are needed. Verify
+# the module loads before handover: a missing prebuild must fail the image
+# build instead of crash-looping Ghost at boot.
+#
+# pnpm keeps its content-addressable store inside /opt/ghost (so it can
+# hardlink into node_modules); node_modules keeps those hardlinks, so the
+# store is a build artifact and is removed before the stage is handed over.
 RUN set -e; \
-    STAGING=/opt/ghost/.sqlite3-staging; \
-    install -d -o ghost -g ghost "$STAGING"; \
-    runuser -u ghost -- npm install --prefix "$STAGING" sqlite3@5.1.7 --no-audit --no-fund --loglevel=error --no-update-notifier; \
-    rm -rf /opt/ghost/current/node_modules/sqlite3; \
-    mv "$STAGING/node_modules/sqlite3" /opt/ghost/current/node_modules/sqlite3; \
-    rm -rf "$STAGING"; \
-    runuser -u ghost -- node -e "require('/opt/ghost/current/node_modules/sqlite3')"
+    rm -rf /opt/ghost/.pnpm-store; \
+    runuser -u ghost -- node -e "require('/opt/ghost/current/node_modules/better-sqlite3')"
 
 # =============================================================================
 # Final image: the Node binary plus the installed Ghost application. No
-# Python, no Ghost CLI, no npm, no package-install layers at all.
+# Python, no Ghost CLI, no npm or pnpm, no package-install layers at all.
 # =============================================================================
 FROM ghcr.io/hassio-addons/debian-base:32770e4@sha256:c16befd0489d0f873f66b41c1d028b8978dea70c93b606e9b1cf237c17b7abca
 

@@ -3,66 +3,33 @@
  * proxy injects this script into the admin document before </head>, with
  * the hashed dark loader video in data-dark-loader when the build has one.
  *
- * The script owns a private class (ha-auth-dark) and a critical stylesheet
- * scoped to it. It never touches Ghost's own `dark` class or Night shift
- * stylesheet, so the authenticated admin panel is completely unaffected:
- * the class is removed as soon as the app has booted outside an
- * unauthenticated route, and every rule is scoped to the auth flow or the
- * boot loader.
+ * Ghost 6's admin is a React application that ships a complete dark theme
+ * behind a `dark` class on <html> and owns that class once a signed-in
+ * user's preference is loaded. The script applies the class on the
+ * unauthenticated screens (where the app has no user preference to apply)
+ * plus a private marker class used for the add-on logo and the boot splash.
+ * If the application changes the class while an auth screen is showing —
+ * it applies the user's preference as soon as the session loads — the
+ * script treats that as the app taking over and stops forcing the theme, so
+ * it never overrides the application's own state. On authenticated routes
+ * it removes the marker and restores the loader, leaving Ghost's class as
+ * the application set it.
  */
 (function () {
   "use strict";
 
   var STYLE_ID = "ha-admin-theme-style";
   var THEME_CLASS = "ha-auth-dark";
+  var GHOST_DARK_CLASS = "dark";
   var SCRIPT_MARKER = "script[data-ha-admin-theme]";
   var EXPLICIT_UNAUTH_ROUTE = /^\/(?:setup|signin|signup|reset)(?:[/?]|$)/;
-  var LOADER_SELECTOR = ".ember-load-indicator";
-  var LOADER_VIDEO_SELECTOR = ".ember-load-indicator video";
+  var BOOT_MARKER_CLASS = "react-admin-mounted";
+  var LOADER_VIDEO_SELECTOR = "#boot-splash video";
+  var SITE_ICON_SIZE = 60;
 
   var CRITICAL_CSS = [
-    "html.ha-auth-dark .ember-load-indicator video { visibility: hidden; }",
-    "html.ha-auth-dark .gh-loading-content { background-color: #15171a; }",
-    "html.ha-auth-dark .gh-loading-spinner { border-color: rgba(255, 255, 255, 0.1); }",
-    "html.ha-auth-dark .gh-loading-spinner:before { background-color: #ffffff; }",
-    "html.ha-auth-dark .gh-flow { color-scheme: dark; background: #15171a; }",
-    "html.ha-auth-dark .gh-flow:has(form:is(.gh-signin, .gh-signup)) { background: #15171a; }",
-    "html.ha-auth-dark .gh-flow-content { color: #e3e6e8; }",
-    "html.ha-auth-dark .gh-flow-content h1,",
-    "html.ha-auth-dark .gh-signin h1 { color: #fafafb; }",
-    "html.ha-auth-dark .gh-flow form label { color: #fafafb; }",
-    "html.ha-auth-dark .gh-setup .gh-flow-content p,",
-    "html.ha-auth-dark .gh-auth-email p { color: #7b8189; }",
-    "html.ha-auth-dark .gh-flow-content .gh-flow-create {",
-    "    background: #1f2328;",
-    "    border-color: #2a3037;",
-    "    box-shadow: 0 20px 45px -10px rgba(0, 0, 0, 0.5);",
-    "}",
-    "html.ha-auth-dark .gh-flow-content .gh-input,",
-    "html.ha-auth-dark :is(.gh-signin, .gh-signup) .gh-input {",
-    "    background: #15171a;",
-    "    border-color: #131416;",
-    "    color: #e3e6e8;",
-    "}",
-    "html.ha-auth-dark .gh-signin .gh-input:focus:not(.gh-signin .gh-input.reset-password:focus),",
-    "html.ha-auth-dark .gh-signup .gh-input:focus,",
-    "html.ha-auth-dark .gh-flow-content .gh-input:focus {",
-    "    background-color: #15171a;",
-    "    border-color: #30cf43;",
-    "    box-shadow: 0 0 0 3px rgba(48, 207, 67, 0.25);",
-    "}",
-    "html.ha-auth-dark .gh-flow .gh-input::placeholder { color: #7c8b9a; }",
-    "html.ha-auth-dark .gh-flow .gh-input-icon svg { fill: #7b8189; }",
-    "html.ha-auth-dark .gh-flow .forgotten-wrap .forgotten-link { border-left-color: #2a3037; }",
-    "html.ha-auth-dark .gh-flow .forgotten-link span { color: #7b8189; }",
-    "html.ha-auth-dark .gh-flow .forgotten-link:hover span { color: #fafafb; }",
-    "html.ha-auth-dark .gh-flow .gh-signin .gh-btn-reset { background: #fafafb !important; }",
-    "html.ha-auth-dark .gh-flow .gh-signin .gh-btn-reset span { color: #15171a; }",
-    "html.ha-auth-dark .gh-flow-content .main-error { color: #f50b23; }",
-    "html.ha-auth-dark .gh-flow-content .main-notification { color: #fafafb; }",
-    "html.ha-auth-dark .gh-flow-content .pw-strength { background: rgba(21, 23, 26, 0.9); }",
-    "html.ha-auth-dark .gh-flow-content .pw-strength-dot { background-color: #394047; }",
-    "html.ha-auth-dark .gh-setup .gh-flow-content header svg { filter: invert(1); }"
+    "html.ha-auth-dark { color-scheme: dark; }",
+    "html.ha-auth-dark body { background-color: #15171a; }"
   ].join("\n");
 
   function parseColor(value) {
@@ -161,13 +128,26 @@
     scriptTag && scriptTag.dataset ? scriptTag.dataset.siteIcon || "" : "";
   var THEME_CSS = siteIconUrl
     ? CRITICAL_CSS +
-      '\n.gh-flow .gh-site-icon { background-image: url("' +
-      siteIconUrl +
-      '") !important; background-size: contain !important; background-position: center !important; background-repeat: no-repeat !important; }'
+      "\n" +
+      "html.ha-auth-dark header > img { display: none; }\n" +
+      "html.ha-auth-dark header::before { content: \"\"; display: block; " +
+      "width: " + SITE_ICON_SIZE + "px; height: " + SITE_ICON_SIZE + "px; " +
+      "border-radius: 4px; " +
+      'background-image: url("' + siteIconUrl + '"); ' +
+      "background-size: contain; background-position: center; " +
+      "background-repeat: no-repeat; }\n" +
+      // Ghost 6's admin sidebar renders the site icon as an image whose
+      // default source is the Ghost orb; the stylesheet is injected into
+      // admin documents only, so replacing its content shows the add-on
+      // logo there without touching Ghost's settings.
+      'img[alt="Site icon"] { content: url("' + siteIconUrl + '"); }'
     : CRITICAL_CSS;
 
   var booted = false;
   var currentDark = false;
+  var lastAppliedDark = null;
+  var appTookOver = false;
+  var lastRoute = null;
   var originalLoaderSource = null;
   var bootObserver = null;
 
@@ -198,11 +178,15 @@
         source.setAttribute("src", darkLoaderUrl);
         if (typeof video.load === "function") video.load();
       }
-      if (video.style) video.style.visibility = "visible";
+      if (video.style && video.style.visibility !== "visible") {
+        video.style.visibility = "visible";
+      }
       return;
     }
     if (dark) {
-      if (video.style) video.style.visibility = "hidden";
+      if (video.style && video.style.visibility !== "hidden") {
+        video.style.visibility = "hidden";
+      }
       return;
     }
     if (
@@ -212,46 +196,108 @@
       source.setAttribute("src", originalLoaderSource);
       if (typeof video.load === "function") video.load();
     }
-    if (video.style) video.style.visibility = "";
+    if (video.style && video.style.visibility !== "") {
+      video.style.visibility = "";
+    }
   }
 
-  function apply(dark) {
+  function hasHtmlClass(name) {
+    var root = window.document.documentElement;
+    return Boolean(root && root.classList && root.classList.contains(name));
+  }
+
+  function setHtmlClass(name, enabled) {
+    var root = window.document.documentElement;
+    if (root && root.classList) {
+      root.classList.toggle(name, Boolean(enabled));
+    }
+  }
+
+  function applyAuthTheme(dark) {
     currentDark = Boolean(dark);
-    window.document.documentElement.classList.toggle(THEME_CLASS, currentDark);
+    setHtmlClass(THEME_CLASS, currentDark);
+    setHtmlClass(GHOST_DARK_CLASS, currentDark);
+    lastAppliedDark = currentDark;
     applyLoaderVideo(currentDark);
   }
 
+  // The application has applied its own preference on an auth screen: keep
+  // its class (never override it), keep the add-on branding, and follow the
+  // effective state for the boot loader.
+  function followAppTheme() {
+    currentDark = hasHtmlClass(GHOST_DARK_CLASS);
+    setHtmlClass(THEME_CLASS, true);
+    applyLoaderVideo(currentDark);
+  }
+
+  function releaseAuthTheme() {
+    currentDark = false;
+    lastAppliedDark = null;
+    setHtmlClass(THEME_CLASS, false);
+    applyLoaderVideo(false);
+  }
+
   function sync() {
+    var route = hashRoute();
+    var routeChanged = route !== lastRoute;
+    lastRoute = route;
+
     if (!booted) {
       ensureStyle();
-      apply(isDark());
+      appTookOver = false;
+      applyAuthTheme(isDark());
       return;
     }
-    if (isExplicitUnauthRoute(hashRoute())) {
+
+    if (isExplicitUnauthRoute(route)) {
       ensureStyle();
-      apply(isDark());
-    } else {
-      apply(false);
+      if (routeChanged) {
+        // A fresh auth screen (initial load, or a logout): the add-on theme
+        // applies again until the application expresses its own preference.
+        appTookOver = false;
+        applyAuthTheme(isDark());
+        return;
+      }
+      if (!appTookOver && lastAppliedDark !== null) {
+        if (hasHtmlClass(GHOST_DARK_CLASS) !== lastAppliedDark) {
+          appTookOver = true;
+        }
+      }
+      if (appTookOver) {
+        followAppTheme();
+      } else {
+        applyAuthTheme(isDark());
+      }
+      return;
     }
+
+    appTookOver = false;
+    releaseAuthTheme();
+  }
+
+  function appHasBooted() {
+    var body = window.document.body;
+    return Boolean(body && body.classList && body.classList.contains(BOOT_MARKER_CLASS));
   }
 
   function checkBoot() {
     if (booted) return;
-    if (window.document.readyState === "loading") return;
-    if (window.document.querySelector(LOADER_SELECTOR)) return;
+    if (!appHasBooted()) return;
     booted = true;
-    if (bootObserver) {
-      bootObserver.disconnect();
-      bootObserver = null;
-    }
     sync();
   }
 
   function watchBoot() {
     var Observer = window.MutationObserver;
     if (typeof Observer === "function") {
+      // The React root and the boot splash are parsed after this script
+      // (it runs in <head>), so re-apply once they exist. The observer
+      // stays attached after boot: React Router updates the hash through
+      // history.replaceState (a redirect from the bare /ghost/ to /setup,
+      // or a page load onto a deep link), which fires no hashchange event,
+      // so the rendered DOM is the reliable signal that the route changed.
       bootObserver = new Observer(function () {
-        applyLoaderVideo(currentDark);
+        sync();
         checkBoot();
       });
       bootObserver.observe(window.document.documentElement, {
@@ -260,8 +306,25 @@
       });
     }
     window.document.addEventListener("DOMContentLoaded", function () {
-      applyLoaderVideo(currentDark);
+      if (booted) return;
+      sync();
       checkBoot();
+    });
+  }
+
+  // React Router updates the hash through history.replaceState (a redirect
+  // from the bare /ghost/ to /setup, or a deep link), which fires no
+  // hashchange event; the rendered DOM is the reliable route signal. This
+  // observer also notices when the application applies its own theme class.
+  function watchGhostTheme() {
+    var Observer = window.MutationObserver;
+    if (typeof Observer !== "function") return;
+    var observer = new Observer(function () {
+      sync();
+    });
+    observer.observe(window.document.documentElement, {
+      attributes: true,
+      attributeFilter: ["class"]
     });
   }
 
@@ -304,6 +367,8 @@
   watchColorScheme();
   watchParentTheme();
   watchBoot();
+  watchGhostTheme();
   window.addEventListener("hashchange", sync);
-  apply(isDark());
+  applyAuthTheme(isDark());
+  checkBoot();
 })();

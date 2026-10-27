@@ -78,8 +78,9 @@ def sandbox_fixture(tmp_path):
             """
         )
     )
-    # Like the real node: requiring the sqlite3 module succeeds only when the
-    # package (marker file) is actually present in the referenced app tree.
+    # Like the real node: requiring the better-sqlite3 module succeeds only
+    # when the package (marker file) is actually present in the referenced
+    # app tree.
     # The scripts also run node for the config-file migration, which must
     # execute for real: the stub therefore hands the invocation to the
     # host's node when one is available (the fake package above resolves
@@ -99,13 +100,13 @@ def sandbox_fixture(tmp_path):
             echo "node cwd=$(pwd) NODE_ENV=${NODE_ENV:-} $@" >> "$CALL_LOG"
             for a in "$@"; do
                 case "$a" in
-                    *node_modules/sqlite3*)
+                    *node_modules/better-sqlite3*)
                         ROOT="${a%%node_modules/*}"
                         case "$ROOT" in
                             *require\\(*) ROOT="${ROOT#*require\\(}" ;;
                         esac
                         ROOT="${ROOT#\\'}"
-                        test -f "${ROOT}node_modules/sqlite3/lib/index.js" || exit 1
+                        test -f "${ROOT}node_modules/better-sqlite3/lib/index.js" || exit 1
                         ;;
                 esac
             done
@@ -115,20 +116,20 @@ def sandbox_fixture(tmp_path):
     node_stub = tmp_path / "node"
     node_stub.write_text(node_stub_body)
     # The Ghost application as installed in the image: versions/ tree with
-    # the sqlite3 module baked in, the current/ symlink, and the .ghost-cli
-    # version marker.
+    # the better-sqlite3 module baked in, the current/ symlink, and the
+    # .ghost-cli version marker.
     app_dir = tmp_path / "app"
-    app_version = app_dir / "versions" / "5.130.6"
-    (app_version / "node_modules" / "sqlite3" / "lib").mkdir(parents=True)
-    (app_version / "node_modules" / "sqlite3" / "lib" / "index.js").write_text(
+    app_version = app_dir / "versions" / "6.73.0"
+    (app_version / "node_modules" / "better-sqlite3" / "lib").mkdir(parents=True)
+    (app_version / "node_modules" / "better-sqlite3" / "lib" / "index.js").write_text(
         "module.exports = 1\n", encoding="utf-8"
     )
     # A real node (the stub's delegate, see below) resolves a package
     # directory through its manifest; without one it would look for
     # index.js at the package root and report the module missing even with
     # the marker present.
-    (app_version / "node_modules" / "sqlite3" / "package.json").write_text(
-        '{"name": "sqlite3", "version": "5.1.7", "main": "lib/index.js"}\n',
+    (app_version / "node_modules" / "better-sqlite3" / "package.json").write_text(
+        '{"name": "better-sqlite3", "version": "12.11.1", "main": "lib/index.js"}\n',
         encoding="utf-8",
     )
     (app_version / "index.js").write_text("console.log('x')", encoding="utf-8")
@@ -140,7 +141,7 @@ def sandbox_fixture(tmp_path):
     (app_dir / "content" / "data").mkdir(parents=True)
     (app_dir / "content" / "themes" / "casper").mkdir(parents=True)
     (app_dir / ".ghost-cli").write_text(
-        '{"active-version": "5.130.6", "cli-version": "1.33.7", "channel": "stable"}',
+        '{"active-version": "6.73.0", "cli-version": "1.34.0", "channel": "stable"}',
         encoding="utf-8",
     )
     runuser_stub = tmp_path / "runuser"
@@ -275,7 +276,7 @@ def test_cont_sets_up_blog_on_first_boot(sandbox):
     )
     current = blog_dir / "current"
     assert current.is_symlink(), "the blog's current/ must be a symlink into the image's app"
-    assert current.resolve() == (Path(env["GHOST_APP_DIR"]) / "versions" / "5.130.6").resolve(), (
+    assert current.resolve() == (Path(env["GHOST_APP_DIR"]) / "versions" / "6.73.0").resolve(), (
         "current/ must resolve to the image's application"
     )
 
@@ -345,11 +346,14 @@ def test_cont_removes_legacy_app_from_volume(sandbox):
     # The legacy current/ symlink is repointed at the image's application.
     current = blog_dir / "current"
     assert current.is_symlink(), "current/ must be a symlink"
-    assert current.resolve() == (Path(env["GHOST_APP_DIR"]) / "versions" / "5.130.6").resolve(), (
+    assert current.resolve() == (Path(env["GHOST_APP_DIR"]) / "versions" / "6.73.0").resolve(), (
         "current/ must now resolve to the image's application"
     )
     # The cleanup must not touch the app shipped in the image.
-    image_app_module = Path(env["GHOST_APP_DIR"]) / "current" / "node_modules" / "sqlite3" / "lib" / "index.js"
+    image_app_module = (
+        Path(env["GHOST_APP_DIR"]) / "current" / "node_modules" / "better-sqlite3"
+        / "lib" / "index.js"
+    )
     assert image_app_module.is_file(), "the image's app must survive the volume cleanup"
 
 
@@ -371,7 +375,7 @@ def test_cont_does_not_rewrite_existing_config(sandbox):
 
 
 def test_cont_publishes_mysql_env_when_selected(sandbox):
-    # Given the add-on options select an external MariaDB
+    # Given the add-on options select an external MySQL 8 server
     # (db_type=mysql plus host, user, password, database name)
     # When the cont-init script runs
     # Then the container environment carries the mysql database__*
@@ -711,21 +715,25 @@ def test_cont_fails_on_incomplete_mysql_options(sandbox):
     assert database_env_files(sandbox[3]) == [], "no partial env may be published"
 
 
-def test_cont_fails_when_image_app_lacks_sqlite3(sandbox):
-    # Given the image's application is missing the sqlite3 module (a broken
-    # image build: the module is baked in at build time, verified there)
+def test_cont_fails_when_image_app_lacks_better_sqlite3(sandbox):
+    # Given the image's application is missing the better-sqlite3 module (a
+    # broken image build: the module is baked in at build time, verified there)
     # When the cont-init script runs
     # Then it exits non-zero (without the driver Ghost would exit silently
     # and the s6 service would crash-loop without any log output)
     _, _, blog_dir, _, env = sandbox
     blog_dir.mkdir(parents=True, exist_ok=True)
     (blog_dir / "config.production.json").write_text("{}", encoding="utf-8")
-    module = Path(env["GHOST_APP_DIR"]) / "versions" / "5.130.6" / "node_modules" / "sqlite3"
+    module = (
+        Path(env["GHOST_APP_DIR"]) / "versions" / "6.73.0" / "node_modules" / "better-sqlite3"
+    )
     for path in module.rglob("*"):
         if path.is_file():
             path.unlink()
     result, calls = run_script(CONT_INIT, env, sandbox[0], shell="bash")
-    assert result.returncode != 0, "boot must fail when the image app lacks the sqlite3 module"
+    assert result.returncode != 0, (
+        "boot must fail when the image app lacks the better-sqlite3 module"
+    )
     assert not [c for c in calls if c.startswith("npm ")], (
         f"no runtime package installs are expected: {calls}"
     )
