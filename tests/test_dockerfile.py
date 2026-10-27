@@ -138,12 +138,15 @@ def test_node_is_pinned_and_hash_verified():
 
 def test_node_install_covers_both_arches():
     # Given the add-on is published for amd64 and aarch64
-    # When the Dockerfile TARGETARCH handling is checked
+    # When the Dockerfile BUILD_ARCH handling is checked
     # Then both architectures map to a known tarball (and unknown ones fail)
+    # BUILD_ARCH is the build arg the Home Assistant builder passes
+    # explicitly (build-image action); TARGETARCH is not part of its contract
     content = DOCKERFILE.read_text(encoding="utf-8")
-    assert "TARGETARCH" in content, "Node download must follow TARGETARCH"
+    assert "BUILD_ARCH" in content, "Node download must follow BUILD_ARCH"
+    assert "TARGETARCH" not in content, "the HA builder provides BUILD_ARCH, not TARGETARCH"
     for arch in ("amd64", "aarch64"):
-        assert arch in content, f"missing TARGETARCH case for {arch}"
+        assert arch in content, f"missing BUILD_ARCH case for {arch}"
 
 
 def test_non_root_user_is_created():

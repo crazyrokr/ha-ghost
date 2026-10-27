@@ -4,18 +4,18 @@ FROM ghcr.io/hassio-addons/debian-base:32770e4 AS app
 # The trixie nodejs package (20.x) is too old: ghost-cli 1.33.7 pulls an
 # execa release that needs Node >= 22.12, and Ghost 5.130.6 supports
 # ^18.12.1 || ^20.11.1 || ^22.13.1.
-ARG TARGETARCH
+ARG BUILD_ARCH
 ARG NODE_VERSION=v22.23.3
 RUN set -e; \
-    TARGETARCH="${TARGETARCH:-amd64}"; \
-    if [ "${TARGETARCH}" = "amd64" ]; then \
+    BUILD_ARCH="${BUILD_ARCH:-amd64}"; \
+    if [ "${BUILD_ARCH}" = "amd64" ]; then \
         ARCH=x64; \
         NODE_SHA256=1084aa36196bba4c3a5e69a1ee388a6e4ff729dad09445fbcd434b28fe3c24af; \
-    elif [ "${TARGETARCH}" = "aarch64" ]; then \
+    elif [ "${BUILD_ARCH}" = "aarch64" ]; then \
         ARCH=arm64; \
         NODE_SHA256=5ced2d48d1d7198739b7f86804de0171aefb6823b684b12341d3321afc3cb0b2; \
     else \
-        echo "unsupported TARGETARCH: ${TARGETARCH}" >&2; \
+        echo "unsupported BUILD_ARCH: ${BUILD_ARCH}" >&2; \
         exit 1; \
     fi; \
     curl -fsSL --retry 3 -o /tmp/node.tar.gz \
@@ -76,18 +76,18 @@ COPY root /
 
 # Same hash-verified Node tarball; the final stage is what ships, so it
 # installs Node itself (without the build stage's Python and Ghost CLI).
-ARG TARGETARCH
+ARG BUILD_ARCH
 ARG NODE_VERSION=v22.23.3
 RUN set -e; \
-    TARGETARCH="${TARGETARCH:-amd64}"; \
-    if [ "${TARGETARCH}" = "amd64" ]; then \
+    BUILD_ARCH="${BUILD_ARCH:-amd64}"; \
+    if [ "${BUILD_ARCH}" = "amd64" ]; then \
         ARCH=x64; \
         NODE_SHA256=1084aa36196bba4c3a5e69a1ee388a6e4ff729dad09445fbcd434b28fe3c24af; \
-    elif [ "${TARGETARCH}" = "aarch64" ]; then \
+    elif [ "${BUILD_ARCH}" = "aarch64" ]; then \
         ARCH=arm64; \
         NODE_SHA256=5ced2d48d1d7198739b7f86804de0171aefb6823b684b12341d3321afc3cb0b2; \
     else \
-        echo "unsupported TARGETARCH: ${TARGETARCH}" >&2; \
+        echo "unsupported BUILD_ARCH: ${BUILD_ARCH}" >&2; \
         exit 1; \
     fi; \
     curl -fsSL --retry 3 -o /tmp/node.tar.gz \
