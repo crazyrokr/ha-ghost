@@ -438,18 +438,20 @@ add-on that runs [Ghost](https://ghost.org/) inside Home Assistant with:
   the script last wrote means Ghost took over; the script then stops
   applying the HA theme for the authenticated document and re-arms when
   the route returns to an explicit unauthenticated route (logout). If the
-  login fails and the task button returns to idle, the freeze lifts and
-  the page re-syncs.
+  login fails after the task button has been observed running and returns
+  to idle, the freeze lifts and the page re-syncs.
 - **Critical stylesheet.** The script injects one `<style>` element
   (idempotent) holding a complete dark theme for the auth flow — every
   `.gh-flow`, `.gh-flow-content`, `.gh-flow-create`, `.gh-signin`,
   `.gh-signup`, `.gh-setup`, `.gh-auth-email`, `.gh-input*` and
   `.gh-loading-*` selector, using Ghost's resolved dark palette
   (`#15171a`, `#1f2328`, `#2a3037`, `#131416`, `#e3e6e8`, `#fafafb`), plus
-  the setup orb filter. It is scoped to `html.dark`, so it is inert on the
-  authenticated admin, and it is present synchronously from script load,
-  so no first paint, logout or night-shift takeover depends on the 588 KB
-  external stylesheet being loaded; `ghost-dark-*.css` only refines it. A
+  the setup orb filter. Its auth selectors are scoped to
+  `html.dark .gh-flow`, and the remaining global rules (`html.dark`,
+  `body`, the loading screen) use Ghost's own dark palette; it is present
+  synchronously from script load, so no first paint, logout or
+  night-shift takeover depends on the 588 KB external stylesheet being
+  loaded; `ghost-dark-*.css` only refines it. A
   minimal set of background/input overrides was rejected: the light
   stylesheet supplies the light text colors, so a dark background with
   unloaded dark styles would show, for example, a dark heading on a dark
@@ -614,11 +616,13 @@ add-on that runs [Ghost](https://ghost.org/) inside Home Assistant with:
   a restart of a mysql-configured container boots in ~1 s without the
   warning.
 - Admin theme synchronization (2026-10-27, automated): the Node suite
-  loads the real browser script into a fake DOM (16 tests: HA parent
-  versus `prefers-color-scheme`, color parsing and luminance, the
-  activation matrix, hash-change deactivation and logout re-arm, the
-  submit freeze, Ghost takeover in both modes, failed-login re-arm, and
-  the single critical stylesheet). The proxy behavior tests (11 new
+  loads the real browser script into a fake DOM (22 tests: HA parent
+  versus `prefers-color-scheme`, color parsing in every supported form —
+  including space-separated `rgb()` and invalid values — the luminance
+  threshold, the activation matrix, hash-change deactivation and logout
+  re-arm, the submit freeze including a body mutation before the running
+  state, Ghost takeover in both modes, failed-login re-arm, and the
+  auth-flow CSS scoping). The proxy behavior tests (11 new
   tests; 110 Python tests in total) cover anonymous and authenticated
   ingress injection, the `data-session` flag, ETag/`Vary: Cookie`
   handling, untouched direct access/blog HTML/JSON, the post-rewrite

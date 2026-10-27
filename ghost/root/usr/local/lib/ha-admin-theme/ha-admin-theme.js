@@ -9,7 +9,7 @@
  * authenticated document it does nothing, so Ghost's own per-user Night
  * shift applies without a flash. The critical stylesheet below styles the
  * auth flow completely, so no first paint depends on the 588 KB
- * ghost-dark.css being loaded.
+ * ghost-dark-<hash>.css being loaded.
  */
 (function () {
   "use strict";
@@ -31,7 +31,7 @@
     "html.dark .gh-flow-content { color: #e3e6e8; }",
     "html.dark .gh-flow-content h1,",
     "html.dark .gh-signin h1 { color: #fafafb; }",
-    "html.dark form label { color: #fafafb; }",
+    "html.dark .gh-flow form label { color: #fafafb; }",
     "html.dark .gh-setup .gh-flow-content p,",
     "html.dark .gh-auth-email p { color: #7b8189; }",
     "html.dark .gh-flow-content .gh-flow-create {",
@@ -52,8 +52,8 @@
     "    border-color: #30cf43;",
     "    box-shadow: 0 0 0 3px rgba(48, 207, 67, 0.25);",
     "}",
-    "html.dark .gh-input::placeholder { color: #7c8b9a; }",
-    "html.dark .gh-input-icon svg { fill: #7b8189; }",
+    "html.dark .gh-flow .gh-input::placeholder { color: #7c8b9a; }",
+    "html.dark .gh-flow .gh-input-icon svg { fill: #7b8189; }",
     "html.dark .forgotten-wrap .forgotten-link { border-left-color: #2a3037; }",
     "html.dark .forgotten-link span { color: #7b8189; }",
     "html.dark .forgotten-link:hover span { color: #fafafb; }",
@@ -93,7 +93,7 @@
     }
 
     var match = text.match(
-      /^rgba?\(\s*(\d+(?:\.\d+)?)\s*,\s*(\d+(?:\.\d+)?)\s*,\s*(\d+(?:\.\d+)?)\s*\)/
+      /^rgba?\(\s*(\d+(?:\.\d+)?)\s*(?:,\s*|\s+)(\d+(?:\.\d+)?)\s*(?:,\s*|\s+)(\d+(?:\.\d+)?)\s*(?:[,/]\s*[\d.]+%?\s*)?\)/
     );
     if (!match) return null;
     var rgb = [Number(match[1]), Number(match[2]), Number(match[3])];
@@ -166,6 +166,7 @@
 
   var lastApplied = null;
   var frozen = false;
+  var seenRunning = false;
   var ghostOwnsTheme = false;
   var takeoverObserver = null;
   var unfreezeObserver = null;
@@ -265,7 +266,11 @@
 
   function unfreezeIfIdle() {
     if (!frozen || ghostOwnsTheme) return;
-    if (isTaskRunning()) return;
+    if (isTaskRunning()) {
+      seenRunning = true;
+      return;
+    }
+    if (!seenRunning) return;
     frozen = false;
     disconnectObservers();
     sync();
@@ -289,6 +294,7 @@
     if (!target.closest(".gh-flow")) return;
     if (!shouldApply()) return;
     frozen = true;
+    seenRunning = false;
     observeTakeover();
     observeUnfreeze();
   }

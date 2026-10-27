@@ -229,8 +229,9 @@ function createBrowser(options = {}) {
     styleCount() {
       return styles.length;
     },
-    dispatchSubmit() {
-      running = true;
+    dispatchSubmit(submitOptions = {}) {
+      running =
+        submitOptions.running === undefined ? true : Boolean(submitOptions.running);
       dispatch("submit", documentListeners, {
         target: {
           closest(selector) {
@@ -563,4 +564,160 @@ test("takeover is only detected while frozen", () => {
   assert.equal(browser.darkClass(), false);
   assert.equal(browser.linkDisabled(), true);
   assert.equal(browser.styleCount(), 1);
+});
+
+test("parent color formats are parsed", () => {
+  // Given the HA parent's background color in each supported CSS form
+  const cases = [
+    ["#0b0", true],
+    ["#fff", false],
+    ["#11131880", true],
+    ["rgb(0, 0, 0)", true],
+    ["rgba(255, 255, 255, 0.5)", false],
+    ["rgb(11 12 16)", true],
+    ["rgb(255 255 255 / 0.5)", false]
+  ];
+
+  for (const [color, expected] of cases) {
+    const browser = createBrowser({
+      session: "absent",
+      hash: "#/signin",
+      parentVars: {"--clear-background-color": color}
+    });
+
+    // When the script loads
+    browser.load();
+
+    // Then the color decides the theme
+    assert.equal(browser.darkClass(), expected, color);
+  }
+});
+
+test("invalid parent colors fall back without throwing", () => {
+  // Given an unparseable color, the OS scheme decides
+  const invalid = createBrowser({
+    session: "absent",
+    hash: "#/signin",
+    parentVars: {"--clear-background-color": "not-a-color"},
+    localDark: true
+  });
+  invalid.load();
+  assert.equal(invalid.darkClass(), true);
+
+  // And an out-of-range channel is rejected the same way
+  const outOfRange = createBrowser({
+    session: "absent",
+    hash: "#/signin",
+    parentVars: {"--clear-background-color": "rgb(300, 0, 0)"},
+    localDark: false
+  });
+  outOfRange.load();
+  assert.equal(outOfRange.darkClass(), false);
+
+  // And the next candidate is used when the first is unparseable
+  const fallback = createBrowser({
+    session: "absent",
+    hash: "#/signin",
+    parentVars: {
+      "--clear-background-color": "not-a-color",
+      "--primary-background-color": "#111318"
+    }
+  });
+  fallback.load();
+  assert.equal(fallback.darkClass(), true);
+});
+
+test("luminance threshold classifies mid greys", () => {
+  // Given the WCAG 0.5 threshold, a dark grey and a light grey
+  const darkGrey = createBrowser({
+    session: "absent",
+    hash: "#/signin",
+    parentVars: {"--clear-background-color": "#808080"}
+  });
+  darkGrey.load();
+  assert.equal(darkGrey.darkClass(), true);
+
+  const lightGrey = createBrowser({
+    session: "absent",
+    hash: "#/signin",
+    parentVars: {"--clear-background-color": "#bfbfbf"}
+  });
+  lightGrey.load();
+  assert.equal(lightGrey.darkClass(), false);
+});
+
+test("Ghost takeover to dark is detected", () => {
+  // Given a light HA sign-in page whose submit is in flight
+  const browser = createBrowser({
+    session: "absent",
+    hash: "#/signin",
+    parentVars: LIGHT_PARENT
+  });
+  browser.load();
+  assert.equal(browser.darkClass(), false);
+  browser.dispatchSubmit();
+
+  // When Ghost applies the account's dark Night shift
+  browser.setGhostTheme(true, false);
+  browser.flushObservers();
+
+  // Then a later HA theme change does not fight it
+  browser.setParentVars(DARK_PARENT);
+  browser.flushObservers();
+  assert.equal(browser.darkClass(), true);
+  assert.equal(browser.linkDisabled(), false);
+
+  // And logout re-arms the HA theme
+  browser.setParentVars(LIGHT_PARENT);
+  browser.setHash("#/dashboard");
+  browser.setHash("#/signin");
+  assert.equal(browser.darkClass(), false);
+  assert.equal(browser.linkDisabled(), true);
+});
+
+test("freeze survives a body mutation before the running state appears", () => {
+  // Given an active dark sign-in page whose submit is in flight, and a body
+  // mutation arrives before the task button renders its running state
+  const browser = createBrowser({
+    session: "absent",
+    hash: "#/signin",
+    parentVars: DARK_PARENT
+  });
+  browser.load();
+  browser.dispatchSubmit({running: false});
+  browser.flushObservers();
+
+  // When the HA theme turns light, the freeze must still hold
+  browser.setParentVars(LIGHT_PARENT);
+  browser.flushObservers();
+  assert.equal(browser.darkClass(), true);
+
+  // And once the button has been seen running and returns to idle, the page
+  // follows the HA theme again
+  browser.setRunning(true);
+  browser.flushObservers();
+  browser.setRunning(false);
+  browser.flushObservers();
+  assert.equal(browser.darkClass(), false);
+  assert.equal(browser.linkDisabled(), true);
+});
+
+test("critical CSS reaches only the auth flow", () => {
+  // Given the critical stylesheet inserted on an ingress admin page
+  const browser = createBrowser({
+    session: "absent",
+    hash: "#/signin",
+    parentVars: DARK_PARENT
+  });
+  browser.load();
+  const css = browser.styleText();
+
+  // Then the generic widget rules are scoped to .gh-flow, so the
+  // authenticated admin is never restyled
+  assert.match(css, /html\.dark \.gh-flow form label/);
+  assert.match(css, /html\.dark \.gh-flow \.gh-input::placeholder/);
+  assert.match(css, /html\.dark \.gh-flow \.gh-input-icon svg/);
+  assert.doesNotMatch(css, /html\.dark form label/);
+  assert.doesNotMatch(css, /html\.dark \.gh-input::placeholder/);
+  assert.doesNotMatch(css, /html\.dark \.gh-input-icon svg/);
 });
