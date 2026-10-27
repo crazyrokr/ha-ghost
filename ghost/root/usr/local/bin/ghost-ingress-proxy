@@ -1,0 +1,451 @@
+#!/usr/bin/env node
+'use strict';
+
+// =============================================================================
+// Home Assistant Add-on: Ghost
+// Ingress URL rewriter.
+//
+// Home Assistant serves add-ons through the ingress panel under a path
+// prefix and strips that prefix before the request reaches the add-on,
+// while announcing it in the X-Ingress-Path header. Ghost builds its
+// theme, content and admin URLs against the site root (the subdirectory
+// part of the configured 'url'), so a page opened under the prefix asks
+// the browser for /assets/... at the Home Assistant host root, where
+// nothing is served.
+//
+// This proxy sits between the Supervisor and Ghost on the ingress port,
+// and only for requests that carry a valid X-Ingress-Path: root-relative
+// URLs and URLs on the configured site origin are rewritten to the
+// session's ingress path, in HTML/CSS bodies and in Location headers.
+// Everything else (direct port traffic without the header, JSON, media,
+// WebSocket upgrades) passes through unchanged.
+// =============================================================================
+
+const http = require('http');
+const zlib = require('zlib');
+const {URL} = require('url');
+
+const DEFAULT_LISTEN_HOST = '0.0.0.0';
+const DEFAULT_LISTEN_PORT = 2369;
+const DEFAULT_UPSTREAM = 'http://127.0.0.1:2368';
+const DEFAULT_SITE_URL = 'http://localhost:2368';
+const BUFFER_LIMIT_BYTES = 16 * 1024 * 1024;
+
+// The Supervisor never adds this header itself; Home Assistant Core does,
+// and the Supervisor forwards it. Only this shape is interpolated into
+// pages, so a spoofed header cannot inject markup or headers.
+const INGRESS_PATH_PATTERN = /^\/api\/hassio_ingress\/[A-Za-z0-9_-]+$/;
+const REWRITABLE_CONTENT_TYPE = /^(text\/html|application\/xhtml\+xml|text\/css)([;\s]|$)/i;
+
+// Every data-* attribute is inspected: the rewrite only applies to values
+// that are root-relative or on the configured site origin, so non-URL data
+// attributes (data-portal, data-locale, ...) are left alone. Ghost carries
+// URL configuration in data-ghost, data-api, data-sodo-search,
+// data-announcement-bar and data-api-url, and new ones appear between
+// releases.
+const URL_ATTRIBUTES = 'href|src|action|poster|content|data-[a-z0-9_-]+';
+const HTML_ATTRIBUTE_URL = new RegExp(`(\\b(?:${URL_ATTRIBUTES})\\s*=\\s*)(["'])([^"']*)\\2`, 'gi');
+const HTML_ATTRIBUTE_SRCSET = /(\bsrcset\s*=\s*)(["'])([^"']*)\2/gi;
+const CSS_URL = /(url\(\s*)(["']?)([\s\S]*?)\2(\s*\))/gi;
+const CSS_IMPORT = /(@import\s+)(["'])([^"']*)\2/gi;
+
+const HOP_BY_HOP_HEADERS = new Set([
+    'connection',
+    'keep-alive',
+    'proxy-authenticate',
+    'proxy-authorization',
+    'te',
+    'trailer',
+    'transfer-encoding',
+    'upgrade'
+]);
+
+const LISTEN_HOST = process.env.GHOST_INGRESS_PROXY_HOST || DEFAULT_LISTEN_HOST;
+const LISTEN_PORT = Number(process.env.GHOST_INGRESS_PROXY_PORT || DEFAULT_LISTEN_PORT);
+const UPSTREAM = parseUpstream(process.env.GHOST_INGRESS_PROXY_UPSTREAM || DEFAULT_UPSTREAM);
+const SITE = parseSiteUrl(
+    process.env.GHOST_INGRESS_PROXY_SITE_URL || process.env.url || DEFAULT_SITE_URL
+);
+
+function parseUpstream(raw) {
+    try {
+        const url = new URL(raw);
+        if (url.protocol !== 'http:') {
+            throw new Error('the upstream must be an http URL');
+        }
+        return {
+            hostname: url.hostname,
+            port: Number(url.port || 80),
+            origin: url.origin
+        };
+    } catch (error) {
+        console.error(`ghost-ingress-proxy: invalid upstream '${raw}': ${error.message}`);
+        process.exit(1);
+    }
+}
+
+function parseSiteUrl(raw) {
+    try {
+        const url = new URL(String(raw).trim());
+        if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+            return null;
+        }
+        return {origin: url.origin};
+    } catch (error) {
+        return null;
+    }
+}
+
+function firstHeaderValue(value) {
+    if (Array.isArray(value)) {
+        value = value[0];
+    }
+    if (typeof value !== 'string') {
+        return '';
+    }
+    return value.split(',')[0].trim();
+}
+
+function parseOrigin(protocol, host) {
+    if (protocol !== 'http' && protocol !== 'https') {
+        return null;
+    }
+    if (!host) {
+        return null;
+    }
+    try {
+        const url = new URL(`${protocol}://${host}`);
+        if (url.username || url.password) {
+            return null;
+        }
+        return url.origin;
+    } catch (error) {
+        return null;
+    }
+}
+
+function ingressContext(request) {
+    const prefix = firstHeaderValue(request.headers['x-ingress-path']);
+    if (!INGRESS_PATH_PATTERN.test(prefix)) {
+        return null;
+    }
+    const protocol = firstHeaderValue(request.headers['x-forwarded-proto']);
+    const host = firstHeaderValue(request.headers['x-forwarded-host']);
+    return {prefix, origin: parseOrigin(protocol, host)};
+}
+
+function mapUrl(value, context) {
+    if (typeof value !== 'string' || value === '') {
+        return value;
+    }
+    if (value.startsWith('//')) {
+        return value;
+    }
+    if (value[0] === '/') {
+        return context.prefix + value;
+    }
+    if (!SITE) {
+        return value;
+    }
+    let url;
+    try {
+        url = new URL(value);
+    } catch (error) {
+        return value;
+    }
+    if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+        return value;
+    }
+    if (url.origin !== SITE.origin) {
+        return value;
+    }
+    const base = context.origin || '';
+    return base + context.prefix + url.pathname + url.search + url.hash;
+}
+
+function mapSrcset(value, context) {
+    return value.replace(
+        /(^|,)(\s*)(\/[^,\s]+|https?:\/\/[^,\s]+)/gi,
+        (match, separator, space, url) => separator + space + mapUrl(url, context)
+    );
+}
+
+function rewriteText(text, context) {
+    let output = text.replace(
+        HTML_ATTRIBUTE_SRCSET,
+        (match, lead, quote, value) => lead + quote + mapSrcset(value, context) + quote
+    );
+    output = output.replace(
+        HTML_ATTRIBUTE_URL,
+        (match, lead, quote, value) => lead + quote + mapUrl(value, context) + quote
+    );
+    output = output.replace(
+        CSS_URL,
+        (match, lead, quote, value, tail) => lead + quote + mapUrl(value, context) + quote + tail
+    );
+    output = output.replace(
+        CSS_IMPORT,
+        (match, lead, quote, value) => lead + quote + mapUrl(value, context) + quote
+    );
+    return output;
+}
+
+function rewriteLocation(value, context) {
+    if (typeof value !== 'string' || value === '') {
+        return value;
+    }
+    if (value.startsWith('//')) {
+        return value;
+    }
+    if (value[0] === '/') {
+        return context.prefix + value;
+    }
+    let url;
+    try {
+        url = new URL(value);
+    } catch (error) {
+        return value;
+    }
+    const target = (origin) => origin + context.prefix + url.pathname + url.search + url.hash;
+    if (SITE && url.origin === SITE.origin) {
+        return target(context.origin || '');
+    }
+    // Ghost builds redirects from the request Host (the Home Assistant
+    // host, not the configured site origin); keep those inside the panel too.
+    if (context.origin && url.origin === context.origin) {
+        return target(context.origin);
+    }
+    return value;
+}
+
+function appendVary(headers, token) {
+    const existing = headers.vary;
+    if (existing === undefined) {
+        headers.vary = token;
+        return;
+    }
+    const values = String(existing)
+        .split(',')
+        .map((value) => value.trim())
+        .filter(Boolean);
+    if (!values.some((value) => value.toLowerCase() === token.toLowerCase())) {
+        values.push(token);
+    }
+    headers.vary = values.join(', ');
+}
+
+function responseHeaders(upstreamResponse, options) {
+    const headers = {};
+    for (const [name, value] of Object.entries(upstreamResponse.headers)) {
+        if (HOP_BY_HOP_HEADERS.has(name)) {
+            continue;
+        }
+        if (options.rewritten && (name === 'content-length' || name === 'etag')) {
+            continue;
+        }
+        headers[name] = value;
+    }
+    if (options.context) {
+        if (headers.location !== undefined) {
+            headers.location = rewriteLocation(String(headers.location), options.context);
+        }
+        appendVary(headers, 'X-Ingress-Path');
+    }
+    if (options.gzip) {
+        headers['content-encoding'] = 'gzip';
+        appendVary(headers, 'Accept-Encoding');
+    }
+    return headers;
+}
+
+function upstreamHeaders(request) {
+    const headers = {};
+    for (const [name, value] of Object.entries(request.headers)) {
+        if (HOP_BY_HOP_HEADERS.has(name)) {
+            continue;
+        }
+        headers[name] = value;
+    }
+    // Bodies are decoded by the proxy so rewritten responses can be edited;
+    // the client-facing compression is applied by the proxy itself.
+    headers['accept-encoding'] = 'identity';
+    return headers;
+}
+
+function clientAcceptsGzip(request) {
+    return /\bgzip\b/i.test(String(request.headers['accept-encoding'] || ''));
+}
+
+function sendBadGateway(request, response, error) {
+    console.error(`ghost-ingress-proxy: ${request.method} ${request.url}: ${error.message}`);
+    if (!response.headersSent) {
+        response.writeHead(502, {'content-type': 'text/plain; charset=utf-8'});
+    }
+    response.end('Bad Gateway\n');
+}
+
+function sendRewritten(request, response, upstreamResponse, context, chunks) {
+    const original = Buffer.concat(chunks).toString('utf8');
+    let body;
+    try {
+        body = rewriteText(original, context);
+    } catch (error) {
+        body = original;
+    }
+    const gzip = clientAcceptsGzip(request);
+    let payload = Buffer.from(body, 'utf8');
+    const headers = responseHeaders(upstreamResponse, {
+        rewritten: true,
+        context,
+        gzip
+    });
+    if (gzip) {
+        payload = zlib.gzipSync(payload);
+    }
+    headers['content-length'] = String(payload.length);
+    response.writeHead(upstreamResponse.statusCode, headers);
+    response.end(payload);
+}
+
+function bufferAndRewrite(request, response, upstreamResponse, context) {
+    const chunks = [];
+    let size = 0;
+    let streaming = false;
+
+    const startStreaming = () => {
+        streaming = true;
+        const headers = responseHeaders(upstreamResponse, {
+            rewritten: false,
+            context,
+            gzip: false
+        });
+        response.writeHead(upstreamResponse.statusCode, headers);
+        for (const chunk of chunks) {
+            response.write(chunk);
+        }
+        chunks.length = 0;
+        upstreamResponse.pipe(response);
+    };
+
+    upstreamResponse.on('data', (chunk) => {
+        if (streaming) {
+            return;
+        }
+        size += chunk.length;
+        chunks.push(chunk);
+        if (size > BUFFER_LIMIT_BYTES) {
+            startStreaming();
+        }
+    });
+
+    upstreamResponse.on('end', () => {
+        if (streaming) {
+            return;
+        }
+        sendRewritten(request, response, upstreamResponse, context, chunks);
+    });
+
+    upstreamResponse.on('error', (error) => {
+        if (!streaming) {
+            sendBadGateway(request, response, error);
+        }
+    });
+}
+
+function handleResponse(request, response, upstreamResponse, context) {
+    const contentType = String(upstreamResponse.headers['content-type'] || '');
+    const bodiless = upstreamResponse.statusCode === 204 || upstreamResponse.statusCode === 304;
+    const rewritable = Boolean(context)
+        && request.method !== 'HEAD'
+        && !bodiless
+        && REWRITABLE_CONTENT_TYPE.test(contentType)
+        && !upstreamResponse.headers['content-encoding'];
+
+    if (rewritable) {
+        bufferAndRewrite(request, response, upstreamResponse, context);
+        return;
+    }
+
+    const headers = responseHeaders(upstreamResponse, {
+        rewritten: false,
+        context,
+        gzip: false
+    });
+    response.writeHead(upstreamResponse.statusCode, headers);
+    upstreamResponse.pipe(response);
+}
+
+const server = http.createServer((request, response) => {
+    const context = ingressContext(request);
+    const upstreamRequest = http.request(
+        {
+            host: UPSTREAM.hostname,
+            port: UPSTREAM.port,
+            method: request.method,
+            path: request.url,
+            headers: upstreamHeaders(request)
+        },
+        (upstreamResponse) => handleResponse(request, response, upstreamResponse, context)
+    );
+    upstreamRequest.on('error', (error) => sendBadGateway(request, response, error));
+    request.on('error', () => upstreamRequest.destroy());
+    request.pipe(upstreamRequest);
+});
+
+server.on('upgrade', (request, socket, head) => {
+    const headers = {...request.headers, connection: 'Upgrade', upgrade: request.headers.upgrade};
+    const upstreamRequest = http.request({
+        host: UPSTREAM.hostname,
+        port: UPSTREAM.port,
+        method: request.method,
+        path: request.url,
+        headers
+    });
+
+    upstreamRequest.on('upgrade', (upstreamResponse, upstreamSocket, upstreamHead) => {
+        socket.write(
+            `HTTP/1.1 ${upstreamResponse.statusCode} ${upstreamResponse.statusMessage || 'Switching Protocols'}\r\n`
+        );
+        for (let index = 0; index < upstreamResponse.rawHeaders.length; index += 2) {
+            socket.write(`${upstreamResponse.rawHeaders[index]}: ${upstreamResponse.rawHeaders[index + 1]}\r\n`);
+        }
+        socket.write('\r\n');
+        if (upstreamHead && upstreamHead.length) {
+            socket.write(upstreamHead);
+        }
+        if (head && head.length) {
+            upstreamSocket.write(head);
+        }
+        upstreamSocket.pipe(socket);
+        socket.pipe(upstreamSocket);
+        upstreamSocket.on('error', () => socket.destroy());
+        socket.on('error', () => upstreamSocket.destroy());
+    });
+
+    const destroy = () => {
+        upstreamRequest.destroy();
+        socket.destroy();
+    };
+    upstreamRequest.on('error', destroy);
+    socket.on('error', destroy);
+    upstreamRequest.end();
+});
+
+server.on('error', (error) => {
+    console.error(`ghost-ingress-proxy: cannot listen on ${LISTEN_HOST}:${LISTEN_PORT}: ${error.message}`);
+    process.exit(1);
+});
+
+for (const signal of ['SIGTERM', 'SIGINT']) {
+    process.on(signal, () => {
+        server.close(() => process.exit(0));
+    });
+}
+
+server.listen(LISTEN_PORT, LISTEN_HOST, () => {
+    const address = server.address();
+    console.log(
+        `ghost-ingress-proxy: listening on ${LISTEN_HOST}:${address.port} -> ${UPSTREAM.origin}` +
+            ` (site ${SITE ? SITE.origin : 'unset'})`
+    );
+});

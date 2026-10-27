@@ -1,0 +1,12 @@
+#!/command/with-contenv sh
+# ==============================================================================
+# Home Assistant Add-on: Ghost
+# Ingress URL rewriter: Home Assistant serves the add-on under a path
+# prefix and strips it before the request arrives, so Ghost's root-relative
+# URLs would resolve at the Home Assistant host root. The proxy rewrites
+# them per request using the X-Ingress-Path header; traffic without that
+# header (the exposed port, the Supervisor health checks) passes through
+# unchanged. The site origin used for absolute URL rewriting comes from the
+# add-on 'url' option, which the cont-init script publishes as 'url'.
+# ==============================================================================
+exec node /usr/local/bin/ghost-ingress-proxy

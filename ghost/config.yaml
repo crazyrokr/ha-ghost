@@ -1,5 +1,5 @@
 name: Ghost
-version: "0.0.2"
+version: "0.1.0"
 slug: ghost
 description: Runs Ghost within your Home Assistant setup providing integration of live-features
 image: "ghcr.io/crazyrokr/ha-ghost"
@@ -19,7 +19,7 @@ map:
     read_only: False
     path: /share
 ingress: true
-ingress_port: 2368
+ingress_port: 2369
 ports:
   2368/tcp: 2368
 options:

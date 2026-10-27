@@ -11,7 +11,10 @@ container environment (the generated config file carries no `database`
 section, which removes a mysql2 `filename` warning with external databases),
 and the `log_console` option was added. Updated 2026-10-27: Node is
 installed once in a shared `node` stage; the final image copies only the
-node binary instead of re-installing the whole distribution.
+node binary instead of re-installing the whole distribution. Updated
+2026-10-27: ingress traffic is served by an in-image URL-rewriting proxy
+(see Ingress URL rewriting), so the whole blog — not only the admin
+panel — works under the Home Assistant ingress path prefix.
 
 ## Context
 
@@ -79,8 +82,9 @@ add-on that runs [Ghost](https://ghost.org/) inside Home Assistant with:
 - Ghost CLI refuses to run as root while the container runs as root, so a
   dedicated `ghost` user owns the blog volume; the long-running process is
   started with the base image's built-in `runuser` (no su-exec package).
-- The generated config binds `0.0.0.0:2368` (ingress and the exposed port
-  both reach it) and sets the built-in SQLite database. Two Ghost 5 loader
+- The generated config binds `0.0.0.0:2368` (the exposed port; ingress
+  traffic reaches Ghost through the URL rewriter on 2369, see Ingress URL
+  rewriting) and sets the built-in SQLite database. Two Ghost 5 loader
   quirks shape it: the config key is `database` (not `db`; the app default
   is MySQL), and relative paths resolve against the *app* directory — so the
   content path and the SQLite file are absolute paths into the blog volume.
@@ -214,7 +218,8 @@ add-on that runs [Ghost](https://ghost.org/) inside Home Assistant with:
 
 ### Access and persistence
 
-- `ingress: true` on port 2368 **and** `ports: 2368/tcp` (standalone). The
+- `ingress: true` with `ingress_port: 2369` (the URL rewriter, see Ingress
+  URL rewriting) **and** `ports: 2368/tcp` (Ghost directly, standalone). The
   blog front page is `/`, the admin panel `/ghost/` (the admin account is
   created by the user in the setup wizard on first visit; no credentials
   are baked into the add-on).
@@ -223,16 +228,14 @@ add-on that runs [Ghost](https://ghost.org/) inside Home Assistant with:
   configured `url`'s path; an empty `url` falls back to
   `http://localhost:2368/`, which in a visitor's browser resolves to the
   visitor's own machine) and its in-page API calls from the configured
-  `url`. The blog therefore must be reachable at the origin root without a
-  path prefix: the exposed port 2368 (direct `http://<host>:2368` or a
-  domain reverse-proxied onto it), with the `url` option set to that exact
-  origin (the access protocol must match it: Ghost normalizes `http`
-  requests to the `url`'s protocol with a 301, so an `https` url should be
-  reached through a TLS proxy). Home Assistant's built-in ingress serves
-  the add-on under a path prefix (`/api/ghost/...`): the admin panel there
-  still renders (its assets are referenced relative to the document), the
-  front page does not (its root-relative asset references 404 at the host
-  root). This is a Ghost limitation, not an add-on defect.
+  `url`. The exposed port therefore serves the blog at the origin root
+  (direct `http://<host>:2368` or a domain reverse-proxied onto it), with
+  the `url` option set to that exact origin (the access protocol must
+  match it: Ghost normalizes `http` requests to the `url`'s protocol with a
+  301, so an `https` url should be reached through a TLS proxy). Home
+  Assistant's ingress serves the add-on under a path prefix
+  (`/api/hassio_ingress/<token>/`); the rewriter below makes the full blog
+  work there as well, without changing the direct-port behavior.
 - `map:` exposes `addon_config` at `/config` (writable; the blog's content
   and config live there, the application stays in the image) and `share` at
   `/share`; `tmpfs: true` keeps the container's `/tmp` (including bashio's
@@ -247,6 +250,66 @@ add-on that runs [Ghost](https://ghost.org/) inside Home Assistant with:
   file, so existing volumes get console logs on the next start without a
   config rewrite; s6 longrun services without a `log/` directory print
   directly to the container console, verified with a probe service).
+
+### Ingress URL rewriting
+
+- **Why it is needed.** Home Assistant Core's ingress proxy
+  (`homeassistant/components/hassio/ingress.py`) strips the
+  `/api/hassio_ingress/<token>` prefix before forwarding and announces it
+  in `X-Ingress-Path`; the Supervisor forwards the request and that header
+  to the add-on (`supervisor/api/ingress.py`). The token is a 128-hex
+  session id (`secrets.token_hex(64)`) that changes with the ingress
+  session, so it cannot be baked into Ghost's `url` option. Ghost emits
+  root-relative references (`getAssetUrl` = the `url`'s subdirectory +
+  path), and its admin app derives its root at runtime from
+  `window.location.pathname` — the themes have no such logic, so the front
+  page asked the browser for `/assets/...` at the Home Assistant host root
+  and every static resource 404'd. A static `url` subdirectory cannot fix
+  this because the prefix is per session.
+- **The rewriter.** A dependency-free Node reverse proxy
+  (`/usr/local/bin/ghost-ingress-proxy`, started by the `ingress-proxy` s6
+  service) listens on the add-on's ingress port **2369**. Ghost keeps
+  listening on `0.0.0.0:2368`, which remains the exposed port, so direct
+  access bypasses the proxy entirely and is byte-identical to before.
+  The proxy is not a new image dependency: Node is already in the final
+  image, and the script ships with the `root/` tree (`COPY root /`).
+- **What is rewritten.** Only requests carrying a valid
+  `X-Ingress-Path` (the pattern `/api/hassio_ingress/<[A-Za-z0-9_-]+>`; any
+  other value is ignored, so a spoofed header cannot inject markup).
+  `text/html`, `application/xhtml+xml` and `text/css` bodies get:
+  every root-relative URL prefixed; absolute URLs on the configured site
+  origin (canonical/og URLs, navigation, Ghost's `data-*` URL
+  configuration such as Portal's `data-ghost`/`data-api`, the search and
+  announcement-bar scripts' `data-*` attributes, inline `url()` and
+  `@import`) rewritten to
+  `<X-Forwarded-Proto>://<X-Forwarded-Host><prefix>/...` (Home Assistant
+  Core supplies those headers; without them the rewrite falls back to a
+  root-relative path). `srcset` candidates are rewritten individually.
+  `Location` headers are rewritten the same way, including Ghost's
+  redirects to the forwarded host. The admin panel needs no body rewriting
+  (its assets are document-relative and its API root comes from
+  `window.location.pathname`), but its HTML passes through the same
+  rewriter harmlessly.
+- **What is not rewritten.** JSON/API responses, uploads and other
+  non-text types, responses with a `Content-Encoding` (the proxy asks
+  upstream for `identity`; if Ghost still compresses, the body is passed
+  through rather than corrupted), bodyless 204/304 responses, HEAD
+  requests, and WebSocket upgrades (tunnelled). Requests without the
+  ingress header never enter the rewriting path.
+- **Response hygiene.** Rewritten responses drop the upstream `ETag`
+  (the body differs per request), recompute `Content-Length`, add
+  `Vary: X-Ingress-Path`, and are gzipped when the browser accepts it.
+  Non-rewritten responses keep their `ETag`; Vary is still added under
+  ingress.
+- **Trust proxy side effect.** Ghost trusts only loopback
+  (`app.set('trust proxy', 'loopback')`); the proxy connects from
+  `127.0.0.1`, so Home Assistant's `X-Forwarded-Proto` now decides
+  `req.secure` (the Supervisor's bridge address was not trusted).
+- **Site origin.** The rewriter reads the add-on `url` option (published
+  as the `url` container variable) and falls back to Ghost's default
+  `http://localhost:2368`. With an empty option, root-relative references
+  are still prefixed, so ingress browsing works; the origin only matters
+  for absolute references.
 
 ### CI/CD and metadata hygiene
 
@@ -312,7 +375,7 @@ add-on that runs [Ghost](https://ghost.org/) inside Home Assistant with:
 
 ## Verification
 
-- `tests/` (Python, Given-When-Then, 60 tests; run by CI before any build):
+- `tests/` (Python, Given-When-Then, 89 tests; run by CI before any build):
   manifest/hassfest-mirror
   checks, Dockerfile structure (multi-stage layout with the Node pin in the
   shared `node` stage, build-time Ghost install into `/opt/ghost`, Python in
@@ -320,7 +383,7 @@ add-on that runs [Ghost](https://ghost.org/) inside Home Assistant with:
   stage, Node tarball hashes for both architectures),
   CI/renovate/lock consistency (incl. the renovate custom-manager pin
   extraction matched against the actual Dockerfile pins and the Node 22 /
-  Ghost 5 version caps), and behavior tests for the s6 scripts
+  Ghost 5 version caps), behavior tests for the s6 scripts
   (first-boot volume setup with content seeding and config generation
   without a `database` section, legacy in-volume cleanup, the config-file
   migration of the add-on-generated `database` section — incl. the
@@ -328,7 +391,15 @@ add-on that runs [Ghost](https://ghost.org/) inside Home Assistant with:
   verification incl. the broken-image edge case, the sqlite and mysql
   option publishing (the mysql set without a `filename` variable),
   `log_console` on/off with stale-variable clearing, url/mail option
-  publishing and clearing, service start).
+  publishing and clearing, service start), and behavior tests for the
+  ingress rewriter against a fake Ghost (the real Node proxy is started in
+  the test: direct access and non-HTML responses pass through untouched,
+  root-relative attributes/`srcset`/CSS `url()`/`@import` are prefixed,
+  site-origin absolute URLs and `Location` headers are rewritten to the
+  session origin, external URLs and an invalid/spoofed ingress header are
+  left alone, gzip and upstream-compressed bodies, 304 validators, HEAD,
+  POST bodies/query strings, 502 on an unreachable upstream, ETag/Vary
+  handling, and manifest/service/packaging consistency).
 - End-to-end in Docker: an add-on container with the real s6 init against a
   fake supervisor — a fresh volume boots with the image-resident
   application, creates `content/data/ghost.db`, and serves `/` and
