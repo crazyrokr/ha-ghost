@@ -136,6 +136,47 @@ def test_node_is_pinned_and_hash_verified():
     assert "sha256sum -c" in content, "the Node tarball must be hash-verified"
 
 
+def node_stage():
+    # Everything between the shared node stage's header and the next FROM.
+    content = DOCKERFILE.read_text(encoding="utf-8")
+    return content.split(" AS node", 1)[1].split("\nFROM ", 1)[0]
+
+
+def test_node_checksum_is_downloaded_from_the_dist_repository():
+    # Given nodejs.org publishes SHASUMS256.txt alongside every release
+    # When the node stage is checked
+    # Then the checksum file is downloaded from the same versioned dist
+    # directory as the tarball, so a Renovate Node bump needs no hash edits
+    stage = node_stage()
+    assert 'DIST="https://nodejs.org/dist/${NODE_VERSION}"' in stage, (
+        "the checksum must come from the versioned nodejs.org dist directory"
+    )
+    assert '"${DIST}/SHASUMS256.txt"' in stage, "SHASUMS256.txt must be downloaded"
+
+
+def test_node_checksum_is_matched_to_the_arch_tarball():
+    # Given SHASUMS256.txt lists every artifact of the release
+    # When the node stage selects its checksum line
+    # Then it selects the exact architecture tarball from the pinned
+    # version (an unanchored match could verify a different artifact)
+    stage = node_stage()
+    assert 'TARBALL="node-${NODE_VERSION}-linux-${ARCH}.tar.gz"' in stage, stage
+    assert 'grep "  ${TARBALL}\\$" SHASUMS256.txt' in stage, stage
+    assert "sha256sum -c -" in stage, stage
+
+
+def test_node_stage_hardcodes_no_sha256():
+    # Given the checksums now come from the release's SHASUMS256.txt
+    # When the node stage is scanned for digests
+    # Then no hardcoded sha256 remains: a pinned hash goes stale on every
+    # Node update and must be refreshed by hand
+    stage = node_stage()
+    assert not re.search(r"\b[0-9a-f]{64}\b", stage), (
+        "the node stage must not hardcode a sha256 digest"
+    )
+    assert "NODE_SHA256" not in stage, "no per-architecture Node hash should remain"
+
+
 def test_node_install_covers_both_arches():
     # Given the add-on is published for amd64 and aarch64
     # When the Dockerfile BUILD_ARCH handling is checked
@@ -156,6 +197,16 @@ def test_non_root_user_is_created():
     # Then a dedicated ghost user is created for the blog and the service
     content = DOCKERFILE.read_text(encoding="utf-8")
     assert re.search(r"useradd .*ghost\b", content), "a ghost user must be created"
+
+
+def test_addon_logo_is_shipped_for_the_admin_theme():
+    # Given the admin theme replaces the sign-in site icon with the add-on
+    # logo (served by the ingress proxy)
+    # When the root tree and the Dockerfile are checked
+    # Then the logo ships next to the theme script via the root COPY
+    logo = ADDON_DIR / "root" / "usr" / "local" / "lib" / "ha-admin-theme" / "logo.png"
+    assert logo.is_file(), "the add-on logo is missing from the root tree"
+    assert "COPY root /" in final_stage(), "the root tree must be shipped"
 
 
 def test_opencontainers_labels_present():

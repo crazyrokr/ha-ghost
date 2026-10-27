@@ -11,7 +11,14 @@ container environment (the generated config file carries no `database`
 section, which removes a mysql2 `filename` warning with external databases),
 and the `log_console` option was added. Updated 2026-10-27: Node is
 installed once in a shared `node` stage; the final image copies only the
-node binary instead of re-installing the whole distribution.
+node binary instead of re-installing the whole distribution. Updated
+2026-10-27: ingress traffic is served by an in-image URL-rewriting proxy
+(see Ingress URL rewriting), so the whole blog works under the Home
+Assistant ingress path prefix, and the sidebar panel opens the admin
+panel. Updated 2026-10-27: ingress admin pages synchronize the sign-in,
+setup, reset and boot loading screens with the active Home Assistant
+theme (see Admin theme synchronization); the authenticated panel keeps
+Ghost's own Night shift and direct access is unchanged.
 
 ## Context
 
@@ -79,8 +86,9 @@ add-on that runs [Ghost](https://ghost.org/) inside Home Assistant with:
 - Ghost CLI refuses to run as root while the container runs as root, so a
   dedicated `ghost` user owns the blog volume; the long-running process is
   started with the base image's built-in `runuser` (no su-exec package).
-- The generated config binds `0.0.0.0:2368` (ingress and the exposed port
-  both reach it) and sets the built-in SQLite database. Two Ghost 5 loader
+- The generated config binds `0.0.0.0:2368` (the exposed port; ingress
+  traffic reaches Ghost through the URL rewriter on 2369, see Ingress URL
+  rewriting) and sets the built-in SQLite database. Two Ghost 5 loader
   quirks shape it: the config key is `database` (not `db`; the app default
   is MySQL), and relative paths resolve against the *app* directory — so the
   content path and the SQLite file are absolute paths into the blog volume.
@@ -214,25 +222,27 @@ add-on that runs [Ghost](https://ghost.org/) inside Home Assistant with:
 
 ### Access and persistence
 
-- `ingress: true` on port 2368 **and** `ports: 2368/tcp` (standalone). The
+- `ingress: true` with `ingress_port: 2369` (the URL rewriter, see Ingress
+  URL rewriting), `ingress_entry: ghost/` (the sidebar panel opens the
+  admin panel) **and** `ports: 2368/tcp` (Ghost directly, standalone). The
   blog front page is `/`, the admin panel `/ghost/` (the admin account is
   created by the user in the setup wizard on first visit; no credentials
-  are baked into the add-on).
+  are baked into the add-on). `webui` also points at `/ghost/`, so the
+  add-on's **Open Web UI** button opens the admin too; the front page
+  remains available at the origin root and under the ingress base URL.
 - **Access at the origin root.** Ghost builds its theme and core asset
   references relative to the site root (`getAssetUrl` resolves against the
   configured `url`'s path; an empty `url` falls back to
   `http://localhost:2368/`, which in a visitor's browser resolves to the
   visitor's own machine) and its in-page API calls from the configured
-  `url`. The blog therefore must be reachable at the origin root without a
-  path prefix: the exposed port 2368 (direct `http://<host>:2368` or a
-  domain reverse-proxied onto it), with the `url` option set to that exact
-  origin (the access protocol must match it: Ghost normalizes `http`
-  requests to the `url`'s protocol with a 301, so an `https` url should be
-  reached through a TLS proxy). Home Assistant's built-in ingress serves
-  the add-on under a path prefix (`/api/ghost/...`): the admin panel there
-  still renders (its assets are referenced relative to the document), the
-  front page does not (its root-relative asset references 404 at the host
-  root). This is a Ghost limitation, not an add-on defect.
+  `url`. The exposed port therefore serves the blog at the origin root
+  (direct `http://<host>:2368` or a domain reverse-proxied onto it), with
+  the `url` option set to that exact origin (the access protocol must
+  match it: Ghost normalizes `http` requests to the `url`'s protocol with a
+  301, so an `https` url should be reached through a TLS proxy). Home
+  Assistant's ingress serves the add-on under a path prefix
+  (`/api/hassio_ingress/<token>/`); the rewriter below makes the full blog
+  work there as well, without changing the direct-port behavior.
 - `map:` exposes `addon_config` at `/config` (writable; the blog's content
   and config live there, the application stays in the image) and `share` at
   `/share`; `tmpfs: true` keeps the container's `/tmp` (including bashio's
@@ -247,6 +257,235 @@ add-on that runs [Ghost](https://ghost.org/) inside Home Assistant with:
   file, so existing volumes get console logs on the next start without a
   config rewrite; s6 longrun services without a `log/` directory print
   directly to the container console, verified with a probe service).
+
+### Ingress URL rewriting
+
+- **Why it is needed.** Home Assistant Core's ingress proxy
+  (`homeassistant/components/hassio/ingress.py`) strips the
+  `/api/hassio_ingress/<token>` prefix before forwarding and announces it
+  in `X-Ingress-Path`; the Supervisor forwards the request and that header
+  to the add-on (`supervisor/api/ingress.py`). The token is a 128-hex
+  session id (`secrets.token_hex(64)`) that changes with the ingress
+  session, so it cannot be baked into Ghost's `url` option. Ghost emits
+  root-relative references (`getAssetUrl` = the `url`'s subdirectory +
+  path), and its admin app derives its root at runtime from
+  `window.location.pathname` — the themes have no such logic, so the front
+  page asked the browser for `/assets/...` at the Home Assistant host root
+  and every static resource 404'd. A static `url` subdirectory cannot fix
+  this because the prefix is per session.
+- **Panel entry.** `ingress_entry: ghost/` makes the sidebar panel open
+  Ghost's admin panel: the Supervisor builds the panel URL as the ingress
+  URL plus this value (verified in `supervisor/apps/app.py`:
+  `ingress_url` = `/api/hassio_ingress/<token>/` + `ingress_entry`). The
+  value is relative without a leading slash — a leading slash would yield
+  a double slash — and the trailing slash avoids Ghost's `/ghost` →
+  `/ghost/` redirect. `webui` points at `/ghost/` as well. The rewriter
+  still serves the whole blog under the prefix, so the front page remains
+  reachable at the ingress base URL.
+- **The rewriter.** A dependency-free Node reverse proxy
+  (`/usr/local/bin/ghost-ingress-proxy`, started by the `ingress-proxy` s6
+  service) listens on the add-on's ingress port **2369**. Ghost keeps
+  listening on `0.0.0.0:2368`, which remains the exposed port, so direct
+  access bypasses the proxy entirely and is byte-identical to before.
+  The proxy is not a new image dependency: Node is already in the final
+  image, and the script ships with the `root/` tree (`COPY root /`).
+- **What is rewritten.** Only requests carrying a valid
+  `X-Ingress-Path` (the pattern `/api/hassio_ingress/<[A-Za-z0-9_-]+>`; any
+  other value is ignored, so a spoofed header cannot inject markup).
+  `text/html`, `application/xhtml+xml` and `text/css` bodies get:
+  every root-relative URL prefixed; absolute URLs on the configured site
+  origin (canonical/og URLs, navigation, Ghost's `data-*` URL
+  configuration such as Portal's `data-ghost`/`data-api`, the search and
+  announcement-bar scripts' `data-*` attributes, inline `url()` and
+  `@import`) rewritten to
+  `<X-Forwarded-Proto>://<X-Forwarded-Host><prefix>/...` (Home Assistant
+  Core supplies those headers; without them the rewrite falls back to a
+  root-relative path). `srcset` candidates are rewritten individually.
+  `Location` headers are rewritten the same way, including Ghost's
+  redirects to the forwarded host. The admin panel needs no URL rewriting
+  (its assets are document-relative and its API root comes from
+  `window.location.pathname`), but its HTML passes through the same
+  rewriter, where the admin theme synchronization injects its script (see
+  Admin theme synchronization).
+- **What is not rewritten.** JSON/API responses, uploads and other
+  non-text types, responses with a `Content-Encoding` (the proxy asks
+  upstream for `identity`; if Ghost still compresses, the body is passed
+  through rather than corrupted), bodyless 204/304 responses, HEAD
+  requests, and WebSocket upgrades (tunnelled). Requests without the
+  ingress header never enter the rewriting path.
+- **Session cookies.** Ghost scopes its admin session cookie to
+  `<subdir>/ghost` (`express-session.js`: `path = urlUtils.getSubdir() +
+  '/ghost'`, i.e. `/ghost` at the origin root), which never matches the
+  ingress request paths (`<prefix>/ghost/...`). The browser therefore did
+  not return the cookie on the next request, the admin session was lost,
+  and email 2FA verification failed with HTTP 401 "Your verification code
+  is incorrect" (`otp.verify` received `undefined` as the session user id;
+  the emailed code itself is sent during the login request, which is why
+  the email still arrived). The proxy rewrites the `Path` attribute of
+  every non-root cookie on ingress responses (rewritten and pass-through
+  alike) to `<prefix><path>`; root paths (`Path=/`) already match every
+  path and are left alone, and an already-prefixed path is not rewritten
+  twice. The prefix contains the add-on's persisted ingress token
+  (`supervisor/apps/validate.py` defaults `ingress_token` through
+  `secrets.token_urlsafe` and stores it once per install), so the scoped
+  admin session survives sessions, Home Assistant restarts and add-on
+  restarts; only a reinstall changes it. Cookies are left untouched for
+  direct-port requests.
+- **Request origin.** Home Assistant's HTTP middleware adds
+  `Referrer-Policy: no-referrer` to every response
+  (`homeassistant/components/http/headers.py`), including the ingress
+  panel page, so the browser sends no `Referer` with the admin app's
+  requests; same-origin GET requests carry no `Origin` either. Ghost's
+  origin check (`cookieCsrfProtection` in `session-service.js`) derives
+  the request origin from `Origin`/`Referer` and falls back to the
+  configured site URL, which differs from the origin stored in the
+  session at login (the Home Assistant origin). It then answers
+  `400 Request made from incorrect origin` (e.g. `Expected
+  'https://ha.example.com' received 'https://blog.example.com'`), and the
+  admin UI bounces back to the login page. For ingress requests that
+  carry neither header, the proxy supplies
+  `Referer: <session origin><prefix>/` - the origin the browser would
+  otherwise have sent - so the check matches. Existing `Origin`/`Referer`
+  values are never overridden, and direct-port requests are untouched.
+- **Response hygiene.** Rewritten responses drop the upstream `ETag`
+  (the body differs per request), recompute `Content-Length`, add
+  `Vary: X-Ingress-Path`, and are gzipped when the browser accepts it.
+  Non-rewritten responses keep their `ETag`; Vary is still added under
+  ingress.
+- **Trust proxy side effect.** Ghost trusts only loopback
+  (`app.set('trust proxy', 'loopback')`); the proxy connects from
+  `127.0.0.1`, so Home Assistant's `X-Forwarded-Proto` now decides
+  `req.secure` (the Supervisor's bridge address was not trusted).
+- **Site origin.** The rewriter reads the add-on `url` option (published
+  as the `url` container variable) and falls back to Ghost's default
+  `http://localhost:2368`. With an empty option, root-relative references
+  are still prefixed, so ingress browsing works; the origin only matters
+  for absolute references.
+
+### Admin theme synchronization (ingress only)
+
+- **Why the login page is unthemed.** Ghost's admin dark mode ("Night
+  shift") is a per-user flag: after authentication `feature.fetch()` calls
+  `_setAdminTheme()` (`ghost/admin/app/services/feature.js`), which toggles
+  the `dark` class on `<html>` and enables the alternate stylesheet
+  `assets/ghost-dark-<hash>.css`. The sign-in, setup and reset routes have
+  no authenticated user, so that code never runs, and the auth layout
+  (`app/styles/layouts/auth.css`) hardcodes white backgrounds in both the
+  light and the dark bundle. Enabling the dark stylesheet alone is not
+  enough either: the light bundle's resolved text colors (for example the
+  sign-in heading's `#15171a`) stay in effect, so the heading would be dark
+  on a dark background.
+- **Scope.** Only ingress traffic (requests carrying a valid
+  `X-Ingress-Path`) is themed. The exposed port bypasses the proxy
+  entirely, so direct access is unchanged: the admin there keeps Ghost's
+  own Night shift toggle, and the login page stays exactly as Ghost ships
+  it.
+- **Injection.** The ingress proxy, inside its existing HTML rewrite path,
+  injects the source of `ha-admin-theme.js` into the Ghost admin document
+  immediately before `</head>`, inlined in a classic
+  `<script data-ha-admin-theme>` (a separate asset request would delay
+  first paint; the admin sets no CSP). The tag also carries
+  `data-dark-loader="assets/videos/logo-loader-dark-<hash>.mp4"` when the
+  build ships the dark boot-loader video, and
+  `data-site-icon="assets/ha-admin-theme-logo.png"` when the add-on logo
+  shipped. No Ghost stylesheet link is injected: the script themes the
+  auth flow and the boot loader with its own critical stylesheet and never
+  touches Ghost's Night shift state.
+  The admin document is recognised as a GET `text/html` response whose
+  path contains the `/ghost/` segment, whose body carries the
+  `ghost-admin/config/environment` marker, and which is not a HEAD,
+  204/304 or compressed response. The injection runs after `rewriteText`,
+  so the URL and CSS rewriters never see the injected script.
+- **Startup discovery.** The script source (`GHOST_ADMIN_THEME_SCRIPT`,
+  default `/usr/local/lib/ha-admin-theme/ha-admin-theme.js`) is read once
+  when the proxy starts; when it is unreadable the proxy logs once and
+  disables injection, and the add-on keeps serving everything else. The
+  dark loader video (`logo-loader-dark-*.mp4` under
+  `GHOST_ADMIN_ASSETS_DIR`, default
+  `/opt/ghost/current/core/built/admin/assets`) is optional: exactly one
+  present means its path is stamped on the script tag, otherwise the
+  attribute is omitted.
+- **No Ghost theme state.** The script never reads the admin session
+  cookie and never writes Ghost's `dark` class or its Night shift
+  stylesheet; the injected body is identical for every request. The proxy
+  keeps the existing response behaviour (the ETag is dropped because the
+  body is rewritten, the length is recomputed, `Vary: X-Ingress-Path`
+  remains) and adds no cookie dependency.
+- **Theme detection.** The script reads the HA theme from the same-origin
+  ingress parent (`window.parent.getComputedStyle(documentElement)`):
+  `--clear-background-color`, then `--primary-background-color`, parsed as
+  `#rgb`/`#rrggbb`/`#rrggbbaa`/`rgb()`/`rgba()` and classified by WCAG
+  relative luminance (dark below 0.5), so stock and custom HA themes work.
+  When the parent is self, cross-origin or carries no parseable color, the
+  script falls back to `prefers-color-scheme`.
+- **Activation.** The script owns a private `ha-auth-dark` class on
+  `<html>`. It applies it immediately at load, before the body is parsed,
+  so the boot loading screen (the sidebar entry is the bare `/ghost/`)
+  follows the HA theme even on an authenticated document. Once the app has
+  booted (`.ember-load-indicator` is removed), the class is kept only on
+  explicit unauthenticated routes (`#/setup`, `#/setup/done`, `#/signin`,
+  `#/signin/verify`, `#/signup/...`, `#/reset/...`) and every other route,
+  including the empty hash, removes it, so it cannot reach the admin
+  panel. A logout (`#/signin`) re-applies it. The class is independent of
+  Ghost's theme, so no session flag is needed.
+- **Post-login loading.** After the session POST succeeds Ghost runs
+  `handleAuthenticationTask` (`populateUser` + `postAuthPreparation`:
+  config, features, settings, members) while the sign-in form stays on
+  screen with its button spinner (`GhTaskButton @showSuccess=false` keeps
+  the spinner until the transition). `_setAdminTheme()` may toggle Ghost's
+  own state during that window, but the script's private class is
+  independent of it: the hash is still an explicit unauthenticated route,
+  so the sign-in/loading screen keeps the HA theme until the route
+  commits. When the panel route appears the class is removed and Ghost's
+  Night shift takes over. There is no freeze or takeover detection
+  because the script never races Ghost for the same state.
+- **Critical stylesheet.** The script injects one `<style>` element
+  (idempotent) holding a complete dark theme for the auth flow and the
+  boot loader — every `.gh-flow`, `.gh-flow-content`, `.gh-flow-create`,
+  `.gh-signin`, `.gh-signup`, `.gh-setup`, `.gh-auth-email`, `.gh-input*`
+  and `.gh-loading-*` selector, plus the setup orb filter, using Ghost's
+  resolved dark palette (`#15171a`, `#1f2328`, `#2a3037`, `#131416`,
+  `#e3e6e8`, `#fafafb`). Every rule hangs off `html.ha-auth-dark`; there
+  are no `html`/`body` globals, so the stylesheet is inert whenever the
+  class is absent. It is present synchronously from script load, so no
+  first paint depends on an external stylesheet. The light boot-loader
+  video is a dark logo baked on white, so in dark mode the script swaps in
+  `logo-loader-dark-*.mp4` (hidden until the swap, to avoid a white
+  square) and hides the light video when no dark asset exists. When the
+  proxy supplies the add-on logo, the stylesheet also overrides
+  `.gh-flow .gh-site-icon`'s background image (with `!important`, to beat
+  Ghost's inline `site-icon-style`) in both light and dark modes, scaled
+  with `contain` and centred.
+- **What it cannot avoid.** The authenticated panel keeps Ghost's own Night
+  shift; when the HA theme and the account theme differ, the auth/loading
+  screens and the panel use different modes, and the change happens when
+  the panel route replaces the auth screen. That is a boundary between two
+  screens, not a flash inside the panel. The sign-in/loading screen stays
+  on the HA theme for the whole post-login wait; Ghost's own state change
+  does not re-theme it.
+- **Files.** The proxy changes live in
+  `root/usr/local/bin/ghost-ingress-proxy`; the browser script and the
+  add-on logo are `root/usr/local/lib/ha-admin-theme/{ha-admin-theme.js,
+  logo.png}`, shipped by the existing `COPY root /`. No manifest or
+  direct-access change; the dark loader video is the one Ghost ships in
+  the image.
+- **Tests.** The proxy behavior tests cover: ingress admin HTML receiving
+  the script, the dark loader attribute and the site-icon attribute; the
+  site-icon asset served as `image/png` (GET and HEAD); the same document
+  with and without the admin session cookie (no dependency); blog HTML,
+  JSON, CSS and requests without ingress headers left untouched; the ETag
+  dropped and `Vary: X-Ingress-Path` kept without a cookie key; injection
+  disabled (the page still served) when the script is missing; and the
+  dark loader or site-icon attribute omitted when its asset is absent.
+  Node tests load the real script into a fake DOM and cover: color parsing
+  (including space-separated `rgb()`) and the luminance threshold; HA
+  parent versus `prefers-color-scheme` fallback; the loading screen themed
+  on authenticated panel loads; the class removed at boot on panel and
+  empty-hash routes; the post-login spinner keeping the HA theme while
+  Ghost toggles its own state; logout re-application; the dark loader
+  video swap and hide; the site-icon rule present only when the logo is
+  supplied; the scoped critical stylesheet; the single style element; and
+  observer/media re-sync.
 
 ### CI/CD and metadata hygiene
 
@@ -279,9 +518,16 @@ add-on that runs [Ghost](https://ghost.org/) inside Home Assistant with:
   `^22.13.1`, and the build only ships glibc Node 22 tarballs),
   `ghost-cli` (npm, builder stage only), and the
   installed Ghost application version (npm `ghost`, limited to the 5 line
-  until Ghost 6's pnpm 12 requirement is revisited). A Node update PR must
-  also refresh the two per-architecture sha256 hashes (from the nodejs.org
-  dist `SHASUMS256.txt` of the new version).
+  until Ghost 6's pnpm 12 requirement is revisited). A Node update PR
+  changes `NODE_VERSION` only: the node stage downloads that release's
+  `SHASUMS256.txt` from the same dist directory and verifies the
+  architecture-specific tarball against the entry for its exact filename,
+  so no per-architecture hash is hardcoded. The trade-off is explicit: the
+  checksum now travels over the same TLS connection as the tarball, which
+  still catches corrupted or truncated downloads but no longer pins the
+  artifact against a compromised nodejs.org (the previous hardcoded hashes
+  did, at the cost of a manual hash refresh on every Node bump that
+  Renovate could not automate).
 
 ## Consequences
 
@@ -305,7 +551,7 @@ add-on that runs [Ghost](https://ghost.org/) inside Home Assistant with:
 
 ## Verification
 
-- `tests/` (Python, Given-When-Then, 60 tests; run by CI before any build):
+- `tests/` (Python, Given-When-Then, 110 tests; run by CI before any build):
   manifest/hassfest-mirror
   checks, Dockerfile structure (multi-stage layout with the Node pin in the
   shared `node` stage, build-time Ghost install into `/opt/ghost`, Python in
@@ -313,7 +559,7 @@ add-on that runs [Ghost](https://ghost.org/) inside Home Assistant with:
   stage, Node tarball hashes for both architectures),
   CI/renovate/lock consistency (incl. the renovate custom-manager pin
   extraction matched against the actual Dockerfile pins and the Node 22 /
-  Ghost 5 version caps), and behavior tests for the s6 scripts
+  Ghost 5 version caps), behavior tests for the s6 scripts
   (first-boot volume setup with content seeding and config generation
   without a `database` section, legacy in-volume cleanup, the config-file
   migration of the add-on-generated `database` section — incl. the
@@ -321,7 +567,23 @@ add-on that runs [Ghost](https://ghost.org/) inside Home Assistant with:
   verification incl. the broken-image edge case, the sqlite and mysql
   option publishing (the mysql set without a `filename` variable),
   `log_console` on/off with stale-variable clearing, url/mail option
-  publishing and clearing, service start).
+  publishing and clearing, service start), and behavior tests for the
+  ingress rewriter against a fake Ghost (the real Node proxy is started in
+  the test: direct access and non-HTML responses pass through untouched,
+  root-relative attributes/`srcset`/CSS `url()`/`@import` are prefixed,
+  site-origin absolute URLs and `Location` headers are rewritten to the
+  session origin, external URLs and an invalid/spoofed ingress header are
+  left alone, gzip and upstream-compressed bodies, 304 validators, HEAD,
+  POST bodies/query strings, 502 on an unreachable upstream, ETag/Vary
+  handling, and manifest/service/packaging consistency — incl. the
+  `ingress_entry`/`webui` admin-panel entry and the ingress port matching
+  the proxy default). The cookie tests cover the admin session path being
+  scoped to the ingress prefix (the 2FA/login regression), root paths and
+  already-prefixed paths being left alone, and direct access keeping
+  Ghost's original cookie paths. The request-origin tests cover the
+  Referer injected when neither Origin nor Referer is present (Home
+  Assistant's no-referrer policy), and existing headers and direct access
+  being untouched.
 - End-to-end in Docker: an add-on container with the real s6 init against a
   fake supervisor — a fresh volume boots with the image-resident
   application, creates `content/data/ghost.db`, and serves `/` and
@@ -355,3 +617,21 @@ add-on that runs [Ghost](https://ghost.org/) inside Home Assistant with:
   application log lines while the log files in the volume keep them; and
   a restart of a mysql-configured container boots in ~1 s without the
   warning.
+- Admin theme synchronization (2026-10-27, automated): the Node suite
+  loads the real browser script into a fake DOM (19 tests: HA parent
+  versus `prefers-color-scheme`, color parsing in every supported form —
+  including space-separated `rgb()` and invalid values — the luminance
+  threshold, the loading screen on authenticated panel and empty-hash
+  loads, the post-login spinner keeping the HA theme while Ghost toggles
+  its own state, the class removal on panel routes and logout
+  re-application, the dark loader video swap and hide, the site-icon rule,
+  and the auth/loader CSS scoping). The proxy behavior tests (13 new
+  tests; 113 Python tests in total) cover ingress script injection and the
+  asset attributes, the served site-icon PNG (GET/HEAD), cookie
+  independence, untouched direct access/blog HTML/JSON,
+  ETag/`Vary: X-Ingress-Path`, idempotency, a spoofed ingress header, and
+  disabled/partial injection when the script, video or logo is missing.
+  Manual checks pending in a Home Assistant instance: the side panel under
+  dark and light HA themes, the boot loader, the sign-in logo, sign-in to
+  the panel, sign-out, the setup screen, and the direct 2368 port
+  unchanged.
