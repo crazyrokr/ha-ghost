@@ -459,3 +459,108 @@ test("critical style is inserted once", () => {
   // Then the critical stylesheet is not duplicated
   assert.equal(browser.styleCount(), 1);
 });
+
+test("submit freezes HA theme changes", () => {
+  // Given an active dark sign-in page
+  const browser = createBrowser({
+    session: "absent",
+    hash: "#/signin",
+    parentVars: DARK_PARENT
+  });
+  browser.load();
+  assert.equal(browser.darkClass(), true);
+
+  // When the user submits the form and the HA theme turns light while the
+  // account is being prepared
+  browser.dispatchSubmit();
+  browser.setParentVars(LIGHT_PARENT);
+  browser.flushObservers();
+
+  // Then the visible spinner screen keeps its theme (Ghost decides it)
+  assert.equal(browser.darkClass(), true);
+});
+
+test("failed login unfreezes and re-syncs", () => {
+  // Given an active dark sign-in page whose submit is in flight
+  const browser = createBrowser({
+    session: "absent",
+    hash: "#/signin",
+    parentVars: DARK_PARENT
+  });
+  browser.load();
+  browser.dispatchSubmit();
+  browser.setParentVars(LIGHT_PARENT);
+  browser.flushObservers();
+  assert.equal(browser.darkClass(), true);
+
+  // When the task button returns to idle (the login failed)
+  browser.setRunning(false);
+  browser.flushObservers();
+
+  // Then the page follows the current HA theme again
+  assert.equal(browser.darkClass(), false);
+  assert.equal(browser.linkDisabled(), true);
+});
+
+test("Ghost takeover stops re-application", () => {
+  // Given an active dark sign-in page whose submit is in flight
+  const browser = createBrowser({
+    session: "absent",
+    hash: "#/signin",
+    parentVars: DARK_PARENT
+  });
+  browser.load();
+  browser.dispatchSubmit();
+
+  // When Ghost applies the account's (light) Night shift
+  browser.setGhostTheme(false, true);
+  browser.flushObservers();
+
+  // Then a later HA theme change does not fight it
+  browser.setParentVars(DARK_PARENT);
+  browser.flushObservers();
+  assert.equal(browser.darkClass(), false);
+  assert.equal(browser.linkDisabled(), true);
+});
+
+test("logout after a takeover re-arms", () => {
+  // Given a takeover happened during the post-login wait
+  const browser = createBrowser({
+    session: "absent",
+    hash: "#/signin",
+    parentVars: DARK_PARENT
+  });
+  browser.load();
+  browser.dispatchSubmit();
+  browser.setGhostTheme(false, true);
+  browser.flushObservers();
+
+  // When the SPA moves to an authenticated route and the user signs out
+  browser.setHash("#/dashboard");
+  browser.setHash("#/signin");
+
+  // Then the sign-in screen follows the HA theme again
+  assert.equal(browser.darkClass(), true);
+  assert.equal(browser.linkDisabled(), false);
+});
+
+test("takeover is only detected while frozen", () => {
+  // Given an active dark sign-in page with no submit in flight
+  const browser = createBrowser({
+    session: "absent",
+    hash: "#/signin",
+    parentVars: DARK_PARENT
+  });
+  browser.load();
+
+  // When the theme state changes without a submit in flight
+  browser.setGhostTheme(false, true);
+  browser.flushObservers();
+
+  // Then the script is not in takeover mode: it still follows the HA theme
+  browser.setParentVars(LIGHT_PARENT);
+  browser.flushObservers();
+  assert.equal(browser.darkClass(), false);
+  assert.equal(browser.linkDisabled(), true);
+  assert.equal(browser.styleCount(), 1);
+});

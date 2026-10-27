@@ -165,6 +165,10 @@
   );
 
   var lastApplied = null;
+  var frozen = false;
+  var ghostOwnsTheme = false;
+  var takeoverObserver = null;
+  var unfreezeObserver = null;
 
   function shouldApply() {
     var route = hashRoute();
@@ -193,9 +197,117 @@
   }
 
   function sync() {
+    if (frozen || ghostOwnsTheme) return;
     if (!shouldApply()) return;
     ensureStyle();
     apply(isDark());
+  }
+
+  function currentState() {
+    var link = window.document.getElementById(DARK_LINK_ID);
+    return {
+      dark: window.document.documentElement.classList.contains("dark"),
+      linkDisabled: link ? Boolean(link.disabled) : null
+    };
+  }
+
+  function differsFromLastApplied() {
+    if (!lastApplied) return false;
+    var current = currentState();
+    return (
+      current.dark !== lastApplied.dark ||
+      current.linkDisabled !== lastApplied.linkDisabled
+    );
+  }
+
+  function disconnectObservers() {
+    if (takeoverObserver) {
+      takeoverObserver.disconnect();
+      takeoverObserver = null;
+    }
+    if (unfreezeObserver) {
+      unfreezeObserver.disconnect();
+      unfreezeObserver = null;
+    }
+  }
+
+  function onTakeoverCandidate() {
+    if (!frozen || ghostOwnsTheme) return;
+    if (!differsFromLastApplied()) return;
+    ghostOwnsTheme = true;
+    frozen = false;
+    disconnectObservers();
+  }
+
+  function observeTakeover() {
+    var Observer = window.MutationObserver;
+    if (typeof Observer !== "function") return;
+    if (takeoverObserver) takeoverObserver.disconnect();
+    takeoverObserver = new Observer(onTakeoverCandidate);
+    takeoverObserver.observe(window.document.documentElement, {
+      attributes: true,
+      attributeFilter: ["class"]
+    });
+    var link = window.document.getElementById(DARK_LINK_ID);
+    if (link) {
+      takeoverObserver.observe(link, {
+        attributes: true,
+        attributeFilter: ["disabled"]
+      });
+    }
+  }
+
+  function isTaskRunning() {
+    return Boolean(
+      window.document.querySelector('[data-test-task-button-state="running"]')
+    );
+  }
+
+  function unfreezeIfIdle() {
+    if (!frozen || ghostOwnsTheme) return;
+    if (isTaskRunning()) return;
+    frozen = false;
+    disconnectObservers();
+    sync();
+  }
+
+  function observeUnfreeze() {
+    var Observer = window.MutationObserver;
+    if (typeof Observer !== "function") return;
+    if (unfreezeObserver) unfreezeObserver.disconnect();
+    unfreezeObserver = new Observer(unfreezeIfIdle);
+    unfreezeObserver.observe(window.document.body, {
+      childList: true,
+      subtree: true,
+      attributes: true
+    });
+  }
+
+  function onSubmit(event) {
+    var target = event && event.target;
+    if (!target || typeof target.closest !== "function") return;
+    if (!target.closest(".gh-flow")) return;
+    if (!shouldApply()) return;
+    frozen = true;
+    observeTakeover();
+    observeUnfreeze();
+  }
+
+  function onRouteChange() {
+    var route = hashRoute();
+    if (isExplicitUnauthRoute(route)) {
+      frozen = false;
+      ghostOwnsTheme = false;
+      disconnectObservers();
+      sync();
+      return;
+    }
+    if (isHomeRoute(route)) {
+      sync();
+      return;
+    }
+    frozen = false;
+    disconnectObservers();
   }
 
   function watchColorScheme() {
@@ -236,6 +348,7 @@
   ensureStyle();
   watchColorScheme();
   watchParentTheme();
-  window.addEventListener("hashchange", sync);
+  window.addEventListener("hashchange", onRouteChange);
+  window.document.addEventListener("submit", onSubmit, true);
   sync();
 })();
