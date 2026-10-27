@@ -251,15 +251,18 @@ add-on that runs [Ghost](https://ghost.org/) inside Home Assistant with:
   digest pin in `.github/docker-lock.json` matches the actual `FROM`, and
   Renovate no longer carries template rules for the old add-on.
 - The pipeline runs the test suite through the shared `gha-workflows`
-  reusable test workflow before any image build: for every changed app it
-  detects the test files in `tests/` (Python via pytest, installing
-  `tests/requirements.txt` first; JavaScript via the project's
-  `npm test` when a `package.json` test script exists, otherwise through
-  Node's built-in runner, installing the `package.json` dependencies
-  first when that file is present). A failing test fails the test job,
-  and the build job depends on it, so no image is built or published.
-  Both `gha-workflows` references (the auto-locker action and the reusable
-  CI workflow) are pinned to the same full commit SHA.
+  reusable test workflow before any image build. It detects the test
+  files in `tests/` (Python via pytest, installing `tests/requirements.txt`
+  first; JavaScript via the project's `npm test` when a `package.json`
+  test script exists, otherwise through Node's built-in runner,
+  installing the `package.json` dependencies first when that file is
+  present). A `tests/` change runs the suite for every app without
+  rebuilding; a change to an add-on's payload files tests and rebuilds
+  that app; a change to the pipeline workflows tests and rebuilds every
+  app. A failing test fails the test job, and the build job depends on
+  it, so no image is built or published. Both `gha-workflows` references
+  (the auto-locker action and the reusable CI workflow) are pinned to the
+  same full commit SHA.
 - Renovate manages the version pins in the Dockerfile through
   `customManagers` (regex): `NODE_VERSION` (npm `node`, limited to the 22
   line — Ghost 5.130.6 supports `^22.13.1`, and the build only ships glibc
