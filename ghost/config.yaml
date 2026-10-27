@@ -4,7 +4,7 @@ slug: ghost
 description: Runs Ghost within your Home Assistant setup providing integration of live-features
 image: "ghcr.io/crazyrokr/ha-ghost"
 url: https://github.com/crazyrokr/ha-ghost/tree/main/ghost
-webui: http://[HOST]:[PORT:2368]
+webui: http://[HOST]:[PORT:2368]/ghost/
 panel_icon: "mdi:ghost-outline"
 arch:
   - aarch64
@@ -19,6 +19,7 @@ map:
     read_only: False
     path: /share
 ingress: true
+ingress_entry: ghost/
 ingress_port: 2369
 ports:
   2368/tcp: 2368

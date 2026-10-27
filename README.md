@@ -26,12 +26,13 @@ MariaDB/MySQL database can be selected through the add-on options instead.
   to point the blog at an external MariaDB/MySQL database instead.
 - **Two ways in.** The exposed 2368 port for the blog (direct
   `http://<host>:2368`, or through a TLS reverse proxy on a domain) and the
-  add-on's ingress side panel, which serves the whole blog — front page,
-  posts, images, theme assets, navigation and the `/ghost/` admin panel.
+  add-on's ingress side panel, which opens the Ghost admin panel (`/ghost/`)
+  and serves the whole blog under the same ingress path.
 - **Works in the sidebar.** A small ingress URL rewriter ships in the image
   (no extra dependencies, no extra packages): it prefixes the references
   Ghost emits for the browser with the session's ingress path, and is only
-  used for ingress traffic — direct port access is untouched.
+  used for ingress traffic — direct port access is untouched. The sidebar
+  panel and the **Open Web UI** button land on the admin panel.
 - **Safe by design.** The blog runs as a dedicated non-root `ghost` user; the
   container runs under the standard Home Assistant `debian-base` image with
   s6 supervision.
@@ -94,19 +95,22 @@ panel:
   the visitor's own machine. The option is applied on every start, so
   changing it later needs only a restart; the access protocol must match it
   (Ghost redirects `http` requests to the `url`'s protocol).
-- **Ingress side panel — the whole blog.** Open the add-on from the Home
-  Assistant sidebar: the panel serves the front page, posts, images, theme
-  CSS/JS, navigation and the `/ghost/` admin panel. Ghost always builds
-  root-relative paths (it cannot be given a path prefix that changes per
-  ingress session), so the add-on runs a small URL rewriter on its ingress
-  port (2369, internal). For requests coming from Home Assistant it
-  prefixes root-relative references and rewrites URLs on the configured
-  site origin — including `Location` redirects — to the session's ingress
-  path. Requests without Home Assistant's ingress header (the exposed
-  port), API/JSON responses, uploads, WebSocket upgrades and compressed
-  bodies pass through unchanged. Nothing needs to be configured for this;
-  the `url` option still describes the public origin for the exposed port
-  and for links shared outside the panel.
+- **Ingress side panel — admin panel, with the whole blog reachable.**
+  Open the add-on from the Home Assistant sidebar: it lands on the Ghost
+  admin panel (`/ghost/`, via the manifest's `ingress_entry`). The whole
+  blog is also served under the same ingress path — the front page and
+  posts render there (open the ingress base URL in a tab, e.g. the panel
+  URL without the `ghost/` suffix). Ghost always builds root-relative
+  paths (it cannot be given a path prefix that changes per ingress
+  session), so the add-on runs a small URL rewriter on its ingress port
+  (2369, internal). For requests coming from Home Assistant it prefixes
+  root-relative references and rewrites URLs on the configured site origin
+  — including `Location` redirects — to the session's ingress path.
+  Requests without Home Assistant's ingress header (the exposed port),
+  API/JSON responses, uploads, WebSocket upgrades and compressed bodies
+  pass through unchanged. Nothing needs to be configured for this; the
+  `url` option still describes the public origin for the exposed port and
+  for links shared outside the panel.
 
 ## Options
 

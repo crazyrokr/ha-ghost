@@ -13,8 +13,9 @@ and the `log_console` option was added. Updated 2026-10-27: Node is
 installed once in a shared `node` stage; the final image copies only the
 node binary instead of re-installing the whole distribution. Updated
 2026-10-27: ingress traffic is served by an in-image URL-rewriting proxy
-(see Ingress URL rewriting), so the whole blog — not only the admin
-panel — works under the Home Assistant ingress path prefix.
+(see Ingress URL rewriting), so the whole blog works under the Home
+Assistant ingress path prefix, and the sidebar panel opens the admin
+panel.
 
 ## Context
 
@@ -219,10 +220,13 @@ add-on that runs [Ghost](https://ghost.org/) inside Home Assistant with:
 ### Access and persistence
 
 - `ingress: true` with `ingress_port: 2369` (the URL rewriter, see Ingress
-  URL rewriting) **and** `ports: 2368/tcp` (Ghost directly, standalone). The
+  URL rewriting), `ingress_entry: ghost/` (the sidebar panel opens the
+  admin panel) **and** `ports: 2368/tcp` (Ghost directly, standalone). The
   blog front page is `/`, the admin panel `/ghost/` (the admin account is
   created by the user in the setup wizard on first visit; no credentials
-  are baked into the add-on).
+  are baked into the add-on). `webui` also points at `/ghost/`, so the
+  add-on's **Open Web UI** button opens the admin too; the front page
+  remains available at the origin root and under the ingress base URL.
 - **Access at the origin root.** Ghost builds its theme and core asset
   references relative to the site root (`getAssetUrl` resolves against the
   configured `url`'s path; an empty `url` falls back to
@@ -266,6 +270,15 @@ add-on that runs [Ghost](https://ghost.org/) inside Home Assistant with:
   page asked the browser for `/assets/...` at the Home Assistant host root
   and every static resource 404'd. A static `url` subdirectory cannot fix
   this because the prefix is per session.
+- **Panel entry.** `ingress_entry: ghost/` makes the sidebar panel open
+  Ghost's admin panel: the Supervisor builds the panel URL as the ingress
+  URL plus this value (verified in `supervisor/apps/app.py`:
+  `ingress_url` = `/api/hassio_ingress/<token>/` + `ingress_entry`). The
+  value is relative without a leading slash — a leading slash would yield
+  a double slash — and the trailing slash avoids Ghost's `/ghost` →
+  `/ghost/` redirect. `webui` points at `/ghost/` as well. The rewriter
+  still serves the whole blog under the prefix, so the front page remains
+  reachable at the ingress base URL.
 - **The rewriter.** A dependency-free Node reverse proxy
   (`/usr/local/bin/ghost-ingress-proxy`, started by the `ingress-proxy` s6
   service) listens on the add-on's ingress port **2369**. Ghost keeps
@@ -375,7 +388,7 @@ add-on that runs [Ghost](https://ghost.org/) inside Home Assistant with:
 
 ## Verification
 
-- `tests/` (Python, Given-When-Then, 89 tests; run by CI before any build):
+- `tests/` (Python, Given-When-Then, 91 tests; run by CI before any build):
   manifest/hassfest-mirror
   checks, Dockerfile structure (multi-stage layout with the Node pin in the
   shared `node` stage, build-time Ghost install into `/opt/ghost`, Python in
@@ -399,7 +412,9 @@ add-on that runs [Ghost](https://ghost.org/) inside Home Assistant with:
   session origin, external URLs and an invalid/spoofed ingress header are
   left alone, gzip and upstream-compressed bodies, 304 validators, HEAD,
   POST bodies/query strings, 502 on an unreachable upstream, ETag/Vary
-  handling, and manifest/service/packaging consistency).
+  handling, and manifest/service/packaging consistency — incl. the
+  `ingress_entry`/`webui` admin-panel entry and the ingress port matching
+  the proxy default).
 - End-to-end in Docker: an add-on container with the real s6 init against a
   fake supervisor — a fresh volume boots with the image-resident
   application, creates `content/data/ghost.db`, and serves `/` and
