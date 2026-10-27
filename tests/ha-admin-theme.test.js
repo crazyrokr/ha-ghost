@@ -724,6 +724,31 @@ test("the add-on logo replaces the site icon on the auth screens", () => {
   }
 });
 
+test("the add-on logo replaces the admin sidebar site icon", () => {
+  // Given the proxy supplied the add-on logo URL
+  const light = createBrowser({
+    hash: "#/dashboard",
+    parentVars: LIGHT_PARENT,
+    siteIcon: SITE_ICON
+  });
+
+  // When the script loads on a panel route under either HA theme
+  light.load();
+  const dark = createBrowser({
+    hash: "#/dashboard",
+    parentVars: DARK_PARENT,
+    siteIcon: SITE_ICON
+  });
+  dark.load();
+
+  // Then Ghost's sidebar site icon image (the orb) renders the add-on logo
+  // in its place, on authenticated routes as well
+  const rule = `img[alt="Site icon"] { content: url("${SITE_ICON}"); }`;
+  for (const browser of [light, dark]) {
+    assert.ok(browser.styleText().includes(rule), rule);
+  }
+});
+
 test("the site icon rule is absent without the logo attribute", () => {
   // Given a build where the proxy found no add-on logo
   const browser = createBrowser({hash: "#/signin", parentVars: LIGHT_PARENT});

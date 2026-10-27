@@ -135,7 +135,12 @@
       "border-radius: 4px; " +
       'background-image: url("' + siteIconUrl + '"); ' +
       "background-size: contain; background-position: center; " +
-      "background-repeat: no-repeat; }"
+      "background-repeat: no-repeat; }\n" +
+      // Ghost 6's admin sidebar renders the site icon as an image whose
+      // default source is the Ghost orb; the stylesheet is injected into
+      // admin documents only, so replacing its content shows the add-on
+      // logo there without touching Ghost's settings.
+      'img[alt="Site icon"] { content: url("' + siteIconUrl + '"); }'
     : CRITICAL_CSS;
 
   var booted = false;

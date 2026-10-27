@@ -440,7 +440,12 @@ add-on that runs [Ghost](https://ghost.org/) inside Home Assistant with:
   element holding the scoped marker rules (`html.ha-auth-dark`) and, when
   the proxy supplies the add-on logo, hides the React auth header's site
   icon (`header > img[alt=""]`) and draws the add-on logo in its place
-  with a `::before` at the same 60 px size. The dark styling itself is
+  with a `::before` at the same 60 px size. It also replaces the Ghost orb
+  that the admin sidebar renders as its site icon
+  (`img[alt="Site icon"]`, Ghost 6's default `ghost-orb-1.png`) with the
+  add-on logo via `content: url(...)`; that rule is not scoped to the auth
+  marker, so the authenticated panel's sidebar shows the add-on branding
+  too. The dark styling itself is
   Ghost's own `.dark` token block applied to `#root`; the add-on ships no
   copy of Ghost's palette, so a Ghost update cannot leave stale colors.
 - **Boot loader.** Ghost 6's boot splash video is a light logo on white.
@@ -473,9 +478,9 @@ add-on that runs [Ghost](https://ghost.org/) inside Home Assistant with:
   the dark class while Ghost's `<html>` state is never written; the boot
   splash themed on authenticated panel and empty-hash loads; the markers
   removed at boot on panel routes; logout re-application; the dark loader
-  video swap, hide and restore; the site-icon rule present only when the
-  logo is supplied; the scoped critical stylesheet; the single style
-  element; and observer/media re-sync.
+  video swap, hide and restore; the site-icon rules (auth header and admin
+  sidebar) present only when the logo is supplied; the scoped critical
+  stylesheet; the single style element; and observer/media re-sync.
 
 ### CI/CD and metadata hygiene
 
