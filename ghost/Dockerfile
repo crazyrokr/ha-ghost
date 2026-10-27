@@ -45,7 +45,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends python3 python3
 COPY --from=node /usr/local /usr/local
 
 # Pinned Ghost CLI for reproducible builds (managed by Renovate)
-RUN npm install -g --no-audit --no-fund ghost-cli@1.33.7
+RUN npm install -g --no-audit --no-fund ghost-cli@1.34.0
 
 # Ghost CLI refuses to run as root, and its install target must be an
 # empty directory owned by the non-root user.
