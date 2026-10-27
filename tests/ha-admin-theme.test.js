@@ -130,6 +130,9 @@ function createBrowser(options = {}) {
   if (options.darkLoader !== undefined) {
     scriptTag.dataset.darkLoader = options.darkLoader;
   }
+  if (options.siteIcon !== undefined) {
+    scriptTag.dataset.siteIcon = options.siteIcon;
+  }
 
   const fakeDocument = {
     documentElement,
@@ -610,6 +613,41 @@ test("critical CSS is scoped to our class and the auth/loading screens", () => {
   assert.match(css, /html\.ha-auth-dark \.ember-load-indicator video/);
   assert.doesNotMatch(css, /html\.dark/);
   assert.doesNotMatch(css, /html\.ha-auth-dark body/);
+});
+
+test("the add-on logo replaces the site icon on the auth screens", () => {
+  // Given the proxy supplied the add-on logo URL
+  const light = createBrowser({
+    hash: "#/signin",
+    parentVars: LIGHT_PARENT,
+    siteIcon: "assets/ha-admin-theme-logo.png"
+  });
+
+  // When the script loads under either HA theme
+  light.load();
+  const dark = createBrowser({
+    hash: "#/signin",
+    parentVars: DARK_PARENT,
+    siteIcon: "assets/ha-admin-theme-logo.png"
+  });
+  dark.load();
+
+  // Then the rule overrides Ghost's inline site-icon background in both modes
+  const rule =
+    '.gh-flow .gh-site-icon { background-image: url("assets/ha-admin-theme-logo.png") !important;';
+  assert.ok(light.styleText().includes(rule));
+  assert.ok(dark.styleText().includes(rule));
+});
+
+test("the site icon rule is absent without the logo attribute", () => {
+  // Given a build where the proxy found no add-on logo
+  const browser = createBrowser({hash: "#/signin", parentVars: LIGHT_PARENT});
+
+  // When the script loads
+  browser.load();
+
+  // Then Ghost's own site icon is left alone
+  assert.doesNotMatch(browser.styleText(), /gh-site-icon/);
 });
 
 test("critical style is inserted once", () => {

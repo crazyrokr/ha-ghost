@@ -384,12 +384,13 @@ add-on that runs [Ghost](https://ghost.org/) inside Home Assistant with:
   injects the source of `ha-admin-theme.js` into the Ghost admin document
   immediately before `</head>`, inlined in a classic
   `<script data-ha-admin-theme>` (a separate asset request would delay
-  first paint; the admin sets no CSP). When the build ships the dark
-  boot-loader video, the tag also carries
-  `data-dark-loader="assets/videos/logo-loader-dark-<hash>.mp4"`. No
-  Ghost stylesheet link is injected: the script themes the auth flow and
-  the boot loader with its own critical stylesheet and never touches
-  Ghost's Night shift state.
+  first paint; the admin sets no CSP). The tag also carries
+  `data-dark-loader="assets/videos/logo-loader-dark-<hash>.mp4"` when the
+  build ships the dark boot-loader video, and
+  `data-site-icon="assets/ha-admin-theme-logo.png"` when the add-on logo
+  shipped. No Ghost stylesheet link is injected: the script themes the
+  auth flow and the boot loader with its own critical stylesheet and never
+  touches Ghost's Night shift state.
   The admin document is recognised as a GET `text/html` response whose
   path contains the `/ghost/` segment, whose body carries the
   `ghost-admin/config/environment` marker, and which is not a HEAD,
@@ -450,7 +451,11 @@ add-on that runs [Ghost](https://ghost.org/) inside Home Assistant with:
   first paint depends on an external stylesheet. The light boot-loader
   video is a dark logo baked on white, so in dark mode the script swaps in
   `logo-loader-dark-*.mp4` (hidden until the swap, to avoid a white
-  square) and hides the light video when no dark asset exists.
+  square) and hides the light video when no dark asset exists. When the
+  proxy supplies the add-on logo, the stylesheet also overrides
+  `.gh-flow .gh-site-icon`'s background image (with `!important`, to beat
+  Ghost's inline `site-icon-style`) in both light and dark modes, scaled
+  with `contain` and centred.
 - **What it cannot avoid.** The authenticated panel keeps Ghost's own Night
   shift; when the HA theme and the account theme differ, the auth/loading
   screens and the panel use different modes, and the change happens when
@@ -461,23 +466,27 @@ add-on that runs [Ghost](https://ghost.org/) inside Home Assistant with:
 - **Files.** The proxy changes live in
   `root/usr/local/bin/ghost-ingress-proxy`; the browser script is
   `root/usr/local/lib/ha-admin-theme/ha-admin-theme.js`, shipped by the
-  existing `COPY root /`. No manifest, port, Dockerfile or direct-access
-  change; the dark loader video is the one Ghost ships in the image.
+  existing `COPY root /`; the Dockerfile copies `ghost/logo.png` to
+  `/usr/local/lib/ha-admin-theme/logo.png` for the site icon. No manifest
+  or direct-access change; the dark loader video is the one Ghost ships in
+  the image.
 - **Tests.** The proxy behavior tests cover: ingress admin HTML receiving
-  the script and the dark loader attribute; the same document with and
-  without the admin session cookie (no dependency); blog HTML, JSON, CSS
-  and requests without ingress headers left untouched; the ETag dropped
-  and `Vary: X-Ingress-Path` kept without a cookie key; injection disabled
-  (the page still served) when the script is missing; and the dark loader
-  attribute omitted when the video is absent. Node tests load the real
-  script into a fake DOM and cover: color parsing (including
-  space-separated `rgb()`) and the luminance threshold; HA parent versus
-  `prefers-color-scheme` fallback; the loading screen themed on
-  authenticated panel loads; the class removed at boot on panel and
+  the script, the dark loader attribute and the site-icon attribute; the
+  site-icon asset served as `image/png` (GET and HEAD); the same document
+  with and without the admin session cookie (no dependency); blog HTML,
+  JSON, CSS and requests without ingress headers left untouched; the ETag
+  dropped and `Vary: X-Ingress-Path` kept without a cookie key; injection
+  disabled (the page still served) when the script is missing; and the
+  dark loader or site-icon attribute omitted when its asset is absent.
+  Node tests load the real script into a fake DOM and cover: color parsing
+  (including space-separated `rgb()`) and the luminance threshold; HA
+  parent versus `prefers-color-scheme` fallback; the loading screen themed
+  on authenticated panel loads; the class removed at boot on panel and
   empty-hash routes; the post-login spinner keeping the HA theme while
   Ghost toggles its own state; logout re-application; the dark loader
-  video swap and hide; the scoped critical stylesheet; the single style
-  element; and observer/media re-sync.
+  video swap and hide; the site-icon rule present only when the logo is
+  supplied; the scoped critical stylesheet; the single style element; and
+  observer/media re-sync.
 
 ### CI/CD and metadata hygiene
 
@@ -610,18 +619,20 @@ add-on that runs [Ghost](https://ghost.org/) inside Home Assistant with:
   a restart of a mysql-configured container boots in ~1 s without the
   warning.
 - Admin theme synchronization (2026-10-27, automated): the Node suite
-  loads the real browser script into a fake DOM (17 tests: HA parent
+  loads the real browser script into a fake DOM (19 tests: HA parent
   versus `prefers-color-scheme`, color parsing in every supported form —
   including space-separated `rgb()` and invalid values — the luminance
   threshold, the loading screen on authenticated panel and empty-hash
   loads, the post-login spinner keeping the HA theme while Ghost toggles
   its own state, the class removal on panel routes and logout
-  re-application, the dark loader video swap and hide, and the
-  auth/loader CSS scoping). The proxy behavior tests (11 new tests; 110
-  Python tests in total) cover ingress script injection and the dark
-  loader attribute, cookie independence, untouched direct access/blog
-  HTML/JSON, ETag/`Vary: X-Ingress-Path`, idempotency, a spoofed ingress
-  header, and disabled/partial injection when the script or video is
-  missing. Manual checks pending in a Home Assistant instance: the side
-  panel under dark and light HA themes, the boot loader, sign-in to the
-  panel, sign-out, the setup screen, and the direct 2368 port unchanged.
+  re-application, the dark loader video swap and hide, the site-icon rule,
+  and the auth/loader CSS scoping). The proxy behavior tests (13 new
+  tests; 113 Python tests in total) cover ingress script injection and the
+  asset attributes, the served site-icon PNG (GET/HEAD), cookie
+  independence, untouched direct access/blog HTML/JSON,
+  ETag/`Vary: X-Ingress-Path`, idempotency, a spoofed ingress header, and
+  disabled/partial injection when the script, video or logo is missing.
+  Manual checks pending in a Home Assistant instance: the side panel under
+  dark and light HA themes, the boot loader, the sign-in logo, sign-in to
+  the panel, sign-out, the setup screen, and the direct 2368 port
+  unchanged.

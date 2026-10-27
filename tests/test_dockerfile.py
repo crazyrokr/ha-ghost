@@ -199,6 +199,17 @@ def test_non_root_user_is_created():
     assert re.search(r"useradd .*ghost\b", content), "a ghost user must be created"
 
 
+def test_addon_logo_is_shipped_for_the_admin_theme():
+    # Given the admin theme replaces the sign-in site icon with the add-on
+    # logo (served by the ingress proxy)
+    # When the Dockerfile is checked
+    # Then the logo is copied next to the theme script in the final stage
+    assert (ADDON_DIR / "logo.png").is_file(), "ghost/logo.png is missing"
+    assert (
+        "COPY logo.png /usr/local/lib/ha-admin-theme/logo.png" in final_stage()
+    ), "the add-on logo must be shipped for the admin theme"
+
+
 def test_opencontainers_labels_present():
     # Given the Dockerfile exists
     # When its LABEL metadata is checked

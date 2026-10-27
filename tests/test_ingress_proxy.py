@@ -81,6 +81,7 @@ ADMIN_HTML = """<!DOCTYPE html>
 THEME_SCRIPT = (
     ADDON_DIR / "root" / "usr" / "local" / "lib" / "ha-admin-theme" / "ha-admin-theme.js"
 )
+THEME_LOGO_BYTES = b"\x89PNG\r\n\x1a\nfake-addon-logo"
 
 STYLE_CSS = """@import "/imported.css";
 .x { background: url(/content/images/bg.png); }
@@ -230,10 +231,11 @@ def start_proxy(node, port, upstream, tmp_path, site=SITE_ORIGIN, extra_env=None
     return process, log_path
 
 
-def theme_env(tmp_path, assets_dir=None, script_path=None):
+def theme_env(tmp_path, assets_dir=None, script_path=None, logo_path=None):
     return {
         "GHOST_ADMIN_ASSETS_DIR": str(assets_dir or tmp_path / "admin-assets"),
         "GHOST_ADMIN_THEME_SCRIPT": str(script_path or THEME_SCRIPT),
+        "GHOST_ADMIN_THEME_LOGO": str(logo_path or tmp_path / "theme-logo.png"),
     }
 
 
@@ -289,6 +291,7 @@ def addon_fixture(tmp_path):
     assets = tmp_path / "admin-assets"
     (assets / "videos").mkdir(parents=True)
     (assets / "videos" / "logo-loader-dark-test.mp4").write_bytes(b"")
+    (tmp_path / "theme-logo.png").write_bytes(THEME_LOGO_BYTES)
     process, log_path = start_proxy(
         node,
         port,
@@ -733,11 +736,55 @@ def test_anonymous_ingress_admin_document_is_themed(addon):
     assert status == 200
     assert (
         '<script data-ha-admin-theme '
-        'data-dark-loader="assets/videos/logo-loader-dark-test.mp4">'
+        'data-dark-loader="assets/videos/logo-loader-dark-test.mp4" '
+        'data-site-icon="assets/ha-admin-theme-logo.png">'
     ) in body
     assert "ha-admin-theme-style" in body
     assert "dark-styles" not in body
     assert body.index("data-ha-admin-theme") < body.index("</head>")
+
+
+def test_the_add_on_logo_is_served_for_the_site_icon(addon):
+    # Given the add-on logo shipped in the image
+    # When the browser requests the site-icon asset through ingress
+    # Then the proxy serves the PNG itself instead of forwarding to Ghost,
+    # and HEAD returns the same headers without a body
+    status, headers, payload = fetch(
+        addon.port,
+        "/ghost/assets/ha-admin-theme-logo.png",
+        headers=INGRESS_HEADERS,
+    )
+    assert status == 200
+    assert headers["content-type"] == "image/png"
+    assert payload == THEME_LOGO_BYTES
+
+    status, headers, payload = fetch(
+        addon.port,
+        "/ghost/assets/ha-admin-theme-logo.png",
+        headers=INGRESS_HEADERS,
+        method="HEAD",
+    )
+    assert status == 200
+    assert headers["content-type"] == "image/png"
+    assert payload == b""
+
+
+def test_the_site_icon_attribute_is_omitted_without_the_logo(tmp_path, theming_proxy):
+    # Given a build without the add-on logo
+    # When the admin document is served through ingress
+    # Then the script is still injected, but without the site-icon attribute
+    assets = tmp_path / "assets-with-video"
+    (assets / "videos").mkdir(parents=True)
+    (assets / "videos" / "logo-loader-dark-test.mp4").write_bytes(b"")
+    proxy = theming_proxy(
+        theme_env(tmp_path, assets, logo_path=tmp_path / "missing-logo.png")
+    )
+    status, _, payload = fetch(proxy.port, "/ghost/", headers=INGRESS_HEADERS)
+    body = payload.decode("utf-8")
+    assert status == 200
+    assert 'data-site-icon="' not in body
+    assert 'data-dark-loader="assets/videos/logo-loader-dark-test.mp4"' in body
+    assert "ha-admin-theme-style" in body
 
 
 def test_the_admin_session_cookie_does_not_change_the_document(addon):
@@ -849,17 +896,19 @@ def test_injection_is_disabled_without_the_theme_script(tmp_path, theming_proxy)
 
 
 def test_the_dark_loader_attribute_is_omitted_without_the_video(tmp_path, theming_proxy):
-    # Given a build without the dark loader video
+    # Given a build without the dark loader video but with the add-on logo
     # When the admin document is served through ingress
-    # Then the script is still injected, without the dark loader attribute
+    # Then the script is injected without the dark loader attribute
     assets = tmp_path / "assets-without-video"
     assets.mkdir()
-    proxy = theming_proxy(theme_env(tmp_path, assets))
+    logo = tmp_path / "theme-logo.png"
+    logo.write_bytes(THEME_LOGO_BYTES)
+    proxy = theming_proxy(theme_env(tmp_path, assets, logo_path=logo))
     status, _, payload = fetch(proxy.port, "/ghost/", headers=INGRESS_HEADERS)
     body = payload.decode("utf-8")
     assert status == 200
-    assert "<script data-ha-admin-theme>" in body
     assert 'data-dark-loader="' not in body
+    assert 'data-site-icon="assets/ha-admin-theme-logo.png"' in body
     assert "ha-admin-theme-style" in body
     assert f'href="{PREFIX}/assets/vendor.css"' in body
 

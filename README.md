@@ -36,8 +36,9 @@ MariaDB/MySQL database can be selected through the add-on options instead.
 - **Theme-aware sign-in.** When the admin panel is opened through the Home
   Assistant side panel, the sign-in, setup and reset screens follow the
   active HA theme (light or dark), including the spinner while the account
-  loads after signing in. Direct-port access is unchanged, and the signed-in
-  admin keeps Ghost's own Night shift toggle.
+  loads after signing in, and the sign-in screen shows the add-on logo.
+  Direct-port access is unchanged, and the signed-in admin keeps Ghost's
+  own Night shift toggle.
 - **Safe by design.** The blog runs as a dedicated non-root `ghost` user; the
   container runs under the standard Home Assistant `debian-base` image with
   s6 supervision.

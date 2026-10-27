@@ -157,6 +157,14 @@
     window.document.querySelector(SCRIPT_MARKER);
   var darkLoaderUrl =
     scriptTag && scriptTag.dataset ? scriptTag.dataset.darkLoader || "" : "";
+  var siteIconUrl =
+    scriptTag && scriptTag.dataset ? scriptTag.dataset.siteIcon || "" : "";
+  var THEME_CSS = siteIconUrl
+    ? CRITICAL_CSS +
+      '\n.gh-flow .gh-site-icon { background-image: url("' +
+      siteIconUrl +
+      '") !important; background-size: contain !important; background-position: center !important; background-repeat: no-repeat !important; }'
+    : CRITICAL_CSS;
 
   var booted = false;
   var currentDark = false;
@@ -167,7 +175,7 @@
     if (window.document.getElementById(STYLE_ID)) return;
     var style = window.document.createElement("style");
     style.id = STYLE_ID;
-    style.textContent = CRITICAL_CSS;
+    style.textContent = THEME_CSS;
     var target = window.document.head || window.document.documentElement;
     target.appendChild(style);
   }

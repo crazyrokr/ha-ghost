@@ -46,12 +46,15 @@ const REWRITABLE_CONTENT_TYPE = /^(text\/html|application\/xhtml\+xml|text\/css)
 // missing the injection is disabled and the add-on keeps serving normally.
 const DEFAULT_ADMIN_ASSETS_DIR = '/opt/ghost/current/core/built/admin/assets';
 const DEFAULT_ADMIN_THEME_SCRIPT = '/usr/local/lib/ha-admin-theme/ha-admin-theme.js';
+const DEFAULT_ADMIN_THEME_LOGO = '/usr/local/lib/ha-admin-theme/logo.png';
 const ADMIN_DOCUMENT_MARKER = 'ghost-admin/config/environment';
 const ADMIN_SCRIPT_MARKER = 'data-ha-admin-theme';
 const ADMIN_PATH = /(?:^|\/)ghost(?:\/|$)/;
 const ADMIN_ASSETS_DIR = process.env.GHOST_ADMIN_ASSETS_DIR || DEFAULT_ADMIN_ASSETS_DIR;
 const ADMIN_THEME_SCRIPT_PATH =
     process.env.GHOST_ADMIN_THEME_SCRIPT || DEFAULT_ADMIN_THEME_SCRIPT;
+const ADMIN_THEME_LOGO_PATH =
+    process.env.GHOST_ADMIN_THEME_LOGO || DEFAULT_ADMIN_THEME_LOGO;
 
 // Every data-* attribute is inspected: the rewrite only applies to values
 // that are root-relative or on the configured site origin, so non-URL data
@@ -146,8 +149,21 @@ function readThemeScript(file) {
     }
 }
 
+function readThemeLogo(file) {
+    try {
+        return fs.readFileSync(file);
+    } catch (error) {
+        console.error(
+            `ghost-ingress-proxy: cannot read the admin theme logo '${file}': ${error.message}`
+        );
+        return null;
+    }
+}
+
 const THEME_SCRIPT = readThemeScript(ADMIN_THEME_SCRIPT_PATH);
+const THEME_LOGO = readThemeLogo(ADMIN_THEME_LOGO_PATH);
 const DARK_LOADER = THEME_SCRIPT ? findDarkLoader(ADMIN_ASSETS_DIR) : null;
+const SITE_ICON_URL = THEME_LOGO ? 'assets/ha-admin-theme-logo.png' : null;
 const ADMIN_THEME_ENABLED = Boolean(THEME_SCRIPT);
 
 function isAdminDocument(request, contentType, body) {
@@ -178,13 +194,34 @@ function escapeClosingScript(text) {
 
 function injectAdminTheme(body) {
     const loaderAttribute = DARK_LOADER ? ` data-dark-loader="${DARK_LOADER}"` : '';
+    const iconAttribute = SITE_ICON_URL ? ` data-site-icon="${SITE_ICON_URL}"` : '';
     const markup = [
-        `<script data-ha-admin-theme${loaderAttribute}>`,
+        `<script data-ha-admin-theme${loaderAttribute}${iconAttribute}>`,
         escapeClosingScript(THEME_SCRIPT),
         '</script>'
     ].join('\n');
     const index = body.lastIndexOf('</head>');
     return index === -1 ? body : body.slice(0, index) + markup + '\n' + body.slice(index);
+}
+
+function serveAdminThemeLogo(request, response) {
+    if (!THEME_LOGO) {
+        return false;
+    }
+    if (request.method !== 'GET' && request.method !== 'HEAD') {
+        return false;
+    }
+    const pathname = String(request.url).split('?')[0];
+    if (!/(?:^|\/)ghost\/assets\/ha-admin-theme-logo\.png$/.test(pathname)) {
+        return false;
+    }
+    response.writeHead(200, {
+        'content-type': 'image/png',
+        'content-length': String(THEME_LOGO.length),
+        'cache-control': 'no-cache'
+    });
+    response.end(request.method === 'HEAD' ? undefined : THEME_LOGO);
+    return true;
 }
 
 function firstHeaderValue(value) {
@@ -524,6 +561,9 @@ function handleResponse(request, response, upstreamResponse, context) {
 }
 
 const server = http.createServer((request, response) => {
+    if (serveAdminThemeLogo(request, response)) {
+        return;
+    }
     const context = ingressContext(request);
     const upstreamRequest = http.request(
         {
