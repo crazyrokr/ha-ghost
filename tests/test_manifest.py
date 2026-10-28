@@ -19,7 +19,7 @@ ADDON_DIR = REPO_ROOT / "ghost"
 MANIFEST = ADDON_DIR / "config.yaml"
 
 VALID_ARCHES = {"amd64", "aarch64", "armv7", "armhf", "i386"}
-VALID_MAP_TYPES = {"addon_config", "addon_data", "share", "ssl"}
+VALID_MAP_TYPES = {"app_config", "app_data", "share", "ssl"}
 VALID_STARTUP = {"application", "services"}
 VALID_BOOT = {"auto", "manual"}
 
@@ -138,15 +138,15 @@ def test_map_entries_are_valid(manifest):
 def test_config_directory_is_mapped_read_write():
     # Given Ghost stores its content in the add-on config directory
     # When the map entries are checked
-    # Then addon_config is mapped to /config and writable
+    # Then app_config is mapped to /config and writable
     with MANIFEST.open(encoding="utf-8") as handle:
         manifest = yaml.safe_load(handle)
     config_maps = [
         entry
         for entry in manifest["map"]
-        if entry["type"] == "addon_config" and entry["path"] == "/config"
+        if entry["type"] == "app_config" and entry["path"] == "/config"
     ]
-    assert config_maps, "addon_config must be mapped to /config"
+    assert config_maps, "app_config must be mapped to /config"
     for entry in config_maps:
         assert entry.get("read_only", False) is False, "Ghost needs write access to /config"
 
