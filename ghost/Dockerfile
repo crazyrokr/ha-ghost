@@ -43,7 +43,7 @@ COPY --from=node /usr/local /usr/local
 # Ghost pins pnpm 12 in its package; installing the same version here avoids
 # corepack's package-signing key drift and an extra download. Both stay in
 # this discarded stage.
-RUN npm install -g --no-audit --no-fund ghost-cli@1.34.0 pnpm@12.15.0
+RUN npm install -g --no-audit --no-fund ghost-cli@1.34.0 pnpm@12.16.1
 
 # Ghost CLI refuses to run as root, and its install target must be an
 # empty directory owned by the non-root user.
