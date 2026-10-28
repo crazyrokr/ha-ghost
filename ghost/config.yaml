@@ -12,7 +12,7 @@ arch:
 init: false
 tmpfs: true
 map:
-  - type: addon_config
+  - type: app_config
     read_only: False
     path: /config
   - type: share
