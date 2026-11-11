@@ -53,7 +53,7 @@ RUN useradd --create-home --shell /bin/sh ghost && install -d -o ghost -g ghost 
 # this tree directly at runtime; the persisted volume holds only the
 # user's content and config, so a fresh container starts with no
 # download and add-on updates ship new Ghost versions.
-RUN runuser -u ghost -- ghost install 6.76.0 local --dir /opt/ghost --no-start --no-setup
+RUN runuser -u ghost -- ghost install 6.77.0 local --dir /opt/ghost --no-start --no-setup
 
 # Ghost 6 depends on better-sqlite3 (an optional dependency whose install
 # script downloads a prebuilt binary; the release's pnpm workspace allows
