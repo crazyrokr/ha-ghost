@@ -4,11 +4,11 @@
 # than a hardcoded per-architecture hash, so a Renovate version bump needs
 # no hash edits. The trixie nodejs package (20.x) is too old: ghost-cli
 # 1.34.0 requires ^22.13.0 || ^24.0.0, and Ghost 6.73.0 requires
-# ^22.23.1 || ^24.20.0 (v22.23.4 is the pinned 22 LTS patch).
+# ^22.23.1 || ^24.20.0 (v22.23.5 is the pinned 22 LTS patch).
 FROM ghcr.io/hassio-addons/debian-base:32770e4@sha256:c16befd0489d0f873f66b41c1d028b8978dea70c93b606e9b1cf237c17b7abca AS node
 
 ARG BUILD_ARCH
-ARG NODE_VERSION=v22.23.4
+ARG NODE_VERSION=v22.23.5
 RUN set -e; \
     BUILD_ARCH="${BUILD_ARCH:-amd64}"; \
     if [ "${BUILD_ARCH}" = "amd64" ]; then \
